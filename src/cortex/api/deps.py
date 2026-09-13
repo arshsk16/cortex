@@ -9,6 +9,11 @@ from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from cortex.agent.registry import ToolRegistry
+from cortex.agent.service import AgentService
+from cortex.agent.tools.calculator import CalculatorTool
+from cortex.agent.tools.document_list import DocumentListTool
+from cortex.agent.tools.rag_search import RAGSearchTool
 from cortex.core.config import Settings, get_settings
 from cortex.core.exceptions import ForbiddenError, UnauthorizedError
 from cortex.core.security import decode_access_token
@@ -231,6 +236,28 @@ def get_conversation_rag_service(
     )
 
 
+def get_agent_service(
+    retriever: Annotated[Retriever, Depends(get_retriever)],
+    llm_provider: Annotated[LLMProvider, Depends(get_llm_provider)],
+    prompt_builder: Annotated[PromptBuilder, Depends(get_prompt_builder)],
+    document_service: Annotated[DocumentService, Depends(get_document_service)],
+    conv_service: Annotated[ConversationService, Depends(get_conversation_service)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> AgentService:
+    """Construct a request-scoped AgentService with all three tools registered."""
+    registry = ToolRegistry()
+    registry.register(RAGSearchTool(retriever))
+    registry.register(DocumentListTool(document_service))
+    registry.register(CalculatorTool())
+    return AgentService(
+        llm_provider=llm_provider,
+        tool_registry=registry,
+        prompt_builder=prompt_builder,
+        conversation_service=conv_service,
+        max_tool_calls=settings.agent_max_tool_calls,
+    )
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 DatabaseDep = Annotated[Database, Depends(get_database)]
 SessionDep = Annotated[AsyncSession, Depends(get_db_session)]
@@ -249,5 +276,6 @@ ConversationServiceDep = Annotated[
 ConversationRAGServiceDep = Annotated[
     RAGService, Depends(get_conversation_rag_service)
 ]
+AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 CurrentActiveUserDep = Annotated[User, Depends(get_current_active_user)]

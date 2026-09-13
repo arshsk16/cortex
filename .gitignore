@@ -58,3 +58,4 @@ storage/documents/
 
 # Chroma vector store
 storage/chroma/
+cortex.zip

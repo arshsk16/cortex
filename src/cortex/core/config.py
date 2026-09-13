@@ -173,6 +173,17 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Agent
+    agent_max_tool_calls: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description=(
+            "Maximum number of tool calls the agent may make per request. "
+            "Prevents runaway tool-calling loops."
+        ),
+    )
+
     @field_validator("database_url")
     @classmethod
     def validate_database_url(cls, value: str) -> str:

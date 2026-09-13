@@ -1,5 +1,11 @@
 """Pydantic request/response schemas."""
 
+from cortex.schemas.agent import (
+    AgentCitationRead,
+    AgentResponse,
+    AgentRunRequest,
+    AgentToolCallRead,
+)
 from cortex.schemas.auth import (
     AuthResponse,
     TokenResponse,
@@ -35,6 +41,10 @@ from cortex.schemas.retrieval import (
 from cortex.schemas.user import UserCreate, UserRead, UserUpdate
 
 __all__ = [
+    "AgentCitationRead",
+    "AgentResponse",
+    "AgentRunRequest",
+    "AgentToolCallRead",
     "AuthResponse",
     "ChatRequest",
     "ChatResponse",

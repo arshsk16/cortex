@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from cortex.api.v1.endpoints import (
+    agent,
     auth,
     conversations,
     documents,
@@ -18,3 +19,4 @@ api_router.include_router(documents.router)
 api_router.include_router(retrieval.router)
 api_router.include_router(rag.router)
 api_router.include_router(conversations.router)
+api_router.include_router(agent.router)
