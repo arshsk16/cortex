@@ -178,6 +178,15 @@ class Settings(BaseSettings):
     )
 
     # Agent
+    agent_memory_retrieval_limit: int = Field(
+        default=5,
+        ge=0,
+        le=20,
+        description=(
+            "Maximum number of long-term memory entries retrieved per agent run. "
+            "Set to 0 to disable memory retrieval. Defaults to 5."
+        ),
+    )
     agent_max_tool_calls: int = Field(
         default=5,
         ge=1,
@@ -255,4 +264,5 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return a cached Settings instance (safe for FastAPI dependency injection)."""
     return Settings()
+
 

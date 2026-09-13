@@ -30,6 +30,7 @@ from uuid import uuid4
 
 from cortex.agent.result import ToolCallRecord
 from cortex.retrieval.models import RetrievalResult
+from cortex.schemas.memory import MemorySearchResult
 
 if TYPE_CHECKING:
     from cortex.db.models.conversation import Message
@@ -91,11 +92,19 @@ class AgentState:
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
     retrieved_chunks: list[RetrievalResult] = field(default_factory=list)
 
+    # Long-term semantic memory hits retrieved at run start (Phase 13B)
+    memory_hits: list[MemorySearchResult] = field(default_factory=list)
+
     # Execution metadata
     started_at: float = field(default_factory=time.perf_counter)
 
     # Extensibility hook — unused in Phase 10
     extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def has_memory_hits(self) -> bool:
+        """True when long-term memory entries were retrieved for this run."""
+        return bool(self.memory_hits)
 
     # ------------------------------------------------------------------
     # Convenience helpers

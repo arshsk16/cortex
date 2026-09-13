@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from cortex.db.models.user import User
     from cortex.llm.base import LLMProvider
     from cortex.services.conversation import ConversationService
+    from cortex.services.memory import MemoryService
     from cortex.state_store.base import StateStore
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MAX_TOOL_CALLS = 5
 _DEFAULT_HISTORY_LIMIT = 10
 _DEFAULT_STATE_TTL = 1800  # 30 minutes
+_DEFAULT_MEMORY_LIMIT = 5  # max long-term memory hits per run
 
 
 class AgentService:
@@ -114,6 +116,14 @@ class AgentService:
         on error).  Defaults to ``NullStateStore`` behaviour (no-op).
     state_ttl_seconds:
         TTL for Redis state snapshots.  Defaults to 1800 (30 minutes).
+    memory_service:
+        Optional Phase 13A MemoryService.  When supplied, long-term memories
+        are retrieved at the start of each run and injected into the final
+        grounded-answer prompt as a separate ``LONG-TERM MEMORY`` section.
+        When ``None`` (default), memory retrieval is skipped entirely.
+    memory_retrieval_limit:
+        Maximum number of memory entries to retrieve per run.  Set to 0 to
+        disable retrieval even when a memory_service is configured.
     """
 
     def __init__(
@@ -127,6 +137,8 @@ class AgentService:
         max_tool_calls: int = _DEFAULT_MAX_TOOL_CALLS,
         conversation_history_limit: int = _DEFAULT_HISTORY_LIMIT,
         state_ttl_seconds: int = _DEFAULT_STATE_TTL,
+        memory_service: MemoryService | None = None,
+        memory_retrieval_limit: int = _DEFAULT_MEMORY_LIMIT,
     ) -> None:
         self._llm = llm_provider
         self._registry = tool_registry
@@ -136,6 +148,8 @@ class AgentService:
         self._max_tool_calls = max_tool_calls
         self._history_limit = conversation_history_limit
         self._state_ttl = state_ttl_seconds
+        self._memory_service = memory_service
+        self._memory_limit = memory_retrieval_limit
         self._agent_prompt_builder = AgentPromptBuilder()
 
     # ------------------------------------------------------------------
@@ -220,6 +234,7 @@ class AgentService:
                 question=question,
                 retrieved_chunks=state.retrieved_chunks,
                 history=state.history if state.has_history else None,
+                memory_hits=state.memory_hits if state.has_memory_hits else None,
             )
 
             try:
@@ -354,6 +369,7 @@ class AgentService:
                 question=question,
                 retrieved_chunks=state.retrieved_chunks,
                 history=state.history if state.has_history else None,
+                memory_hits=state.memory_hits if state.has_memory_hits else None,
             )
 
             final_parts: list[str] = []
@@ -466,8 +482,16 @@ class AgentService:
     ) -> AgentState:
         """Build the initial AgentState for this run.
 
-        Loads bounded conversation history (enforcing ownership) and persists
-        the user's message before constructing the state object.
+        Performs three operations in order:
+
+        1. Load bounded conversation history (ownership enforced by
+           :meth:`~cortex.services.conversation.ConversationService.get_history`).
+        2. Persist the incoming user message to the conversation (if one
+           was provided).
+        3. Retrieve long-term semantic memory hits for the current user
+           and question via :class:`~cortex.services.memory.MemoryService`
+           (Phase 13B).  Failure is non-fatal: the run continues without
+           memory context and a warning is logged.
         """
         history = []
 
@@ -495,11 +519,34 @@ class AgentService:
                 first_message=question,
             )
 
+        # Retrieve long-term memories (Phase 13B) -- bounded, user-scoped
+        memory_hits = []
+        if self._memory_service is not None and self._memory_limit > 0:
+            try:
+                memory_hits = await self._memory_service.search(
+                    user=user,
+                    query=question,
+                    limit=self._memory_limit,
+                )
+                logger.debug(
+                    "Retrieved %d long-term memory hits for user_id=%s",
+                    len(memory_hits),
+                    user.id,
+                )
+            except Exception:
+                logger.warning(
+                    "AgentService: memory retrieval failed; continuing without "
+                    "long-term memory (user_id=%s)",
+                    user.id,
+                    exc_info=True,
+                )
+
         state = AgentState(
             question=question,
             user=user,
             conversation_id=conversation_id,
             history=history,
+            memory_hits=memory_hits,
         )
         await self._save_state(state, status="in_progress")
         return state
@@ -978,6 +1025,7 @@ class AgentService:
                 for tc in state.tool_calls
             ],
             "retrieved_chunk_ids": [c.chunk_id for c in state.retrieved_chunks],
+            "memory_hits_count": len(state.memory_hits),
             "status": status,
             "error": error,
         }

@@ -251,6 +251,7 @@ def get_agent_service(
     document_service: Annotated[DocumentService, Depends(get_document_service)],
     conv_service: Annotated[ConversationService, Depends(get_conversation_service)],
     state_store: Annotated[StateStore, Depends(get_state_store)],
+    memory_service: Annotated[MemoryService, Depends(get_memory_service)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> AgentService:
     """Construct a request-scoped AgentService with all three tools registered."""
@@ -267,6 +268,8 @@ def get_agent_service(
         max_tool_calls=settings.agent_max_tool_calls,
         conversation_history_limit=settings.conversation_history_limit,
         state_ttl_seconds=settings.agent_state_ttl_seconds,
+        memory_service=memory_service,
+        memory_retrieval_limit=settings.agent_memory_retrieval_limit,
     )
 
 

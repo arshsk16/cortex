@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from cortex.retrieval.models import RetrievalResult
+from cortex.schemas.memory import MemorySearchResult
 
 if TYPE_CHECKING:
     from cortex.db.models.conversation import Message
@@ -38,6 +39,8 @@ _HISTORY_HEADER = "=== CONVERSATION HISTORY ==="
 _HISTORY_FOOTER = "=== END OF HISTORY ==="
 _CONTEXT_HEADER = "=== DOCUMENT CONTEXT ==="
 _CONTEXT_FOOTER = "=== END OF CONTEXT ==="
+_MEMORY_HEADER = "=== LONG-TERM MEMORY ==="
+_MEMORY_FOOTER = "=== END OF LONG-TERM MEMORY ==="
 _QUESTION_HEADER = "=== QUESTION ==="
 
 
@@ -64,6 +67,7 @@ class PromptBuilder:
         question: str,
         retrieved_chunks: list[RetrievalResult],
         history: list[Message] | None = None,
+        memory_hits: list[MemorySearchResult] | None = None,
     ) -> str:
         """Build the full prompt string ready to pass to an :class:`LLMProvider`.
 
@@ -79,6 +83,11 @@ class PromptBuilder:
             provided, they are inserted between system instructions and
             the retrieved context.  Defaults to ``None`` (no history section).
 
+        memory_hits:
+            Long-term memory entries retrieved for this user/question.  When
+            provided, they are inserted between conversation history and
+            the retrieved context.  Defaults to ``None`` (no memory section).
+
         Returns
         -------
         str
@@ -91,6 +100,13 @@ class PromptBuilder:
             history_block = self._build_history_block(history)
             sections.append(
                 f"{_HISTORY_HEADER}\n{history_block}\n{_HISTORY_FOOTER}"
+            )
+
+        # Long-term memory section (only rendered when hits are present)
+        if memory_hits:
+            memory_block = self._build_memory_block(memory_hits)
+            sections.append(
+                f"{_MEMORY_HEADER}\n{memory_block}\n{_MEMORY_FOOTER}"
             )
 
         # Retrieved context section
@@ -106,9 +122,11 @@ class PromptBuilder:
 
         logger.debug(
             "Built RAG prompt ("
-            "chunks=%d, history=%d, question_len=%d, prompt_len=%d)",
+            "chunks=%d, history=%d, memory_hits=%d, "
+            "question_len=%d, prompt_len=%d)",
             len(retrieved_chunks),
             len(history) if history else 0,
+            len(memory_hits) if memory_hits else 0,
             len(question),
             len(prompt),
         )
@@ -125,6 +143,17 @@ class PromptBuilder:
         for msg in messages:
             label = "User" if msg.role == "user" else "Assistant"
             parts.append(f"[{label}]\n{msg.content.strip()}")
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _build_memory_block(hits: list[MemorySearchResult]) -> str:
+        """Format retrieved memory entries as a numbered list."""
+        parts: list[str] = []
+        for i, hit in enumerate(hits, start=1):
+            score_pct = int(hit.score * 100)
+            header = f"[Memory {i} | relevance={score_pct}%]"
+            body = hit.memory.content.strip()
+            parts.append(f"{header}\n{body}")
         return "\n\n".join(parts)
 
     @staticmethod
