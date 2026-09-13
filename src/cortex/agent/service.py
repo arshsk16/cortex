@@ -1,32 +1,34 @@
 """Agent orchestration service — single-agent + tool-calling loop.
 
-Architecture
-------------
-1. Build the initial reasoning prompt (system + tool schemas + question).
-2. Ask the LLM to decide: call a tool, or produce a final answer.
-3. If the LLM picks a tool, dispatch it via
-   :class:`~cortex.agent.registry.ToolRegistry`,
-   append the observation, and loop (up to ``max_tool_calls`` iterations).
-4. After the loop, build a grounded final-answer prompt using the
-   **existing** :class:`~cortex.services.prompt_builder.PromptBuilder` and
-   call :class:`~cortex.llm.base.LLMProvider` — **identical path to RAGService**.
-5. Optionally persist the turn to a conversation via
-   :class:`~cortex.services.conversation.ConversationService`.
+Architecture (Phase 9)
+----------------------
+``AgentService.run()`` has three shared sections that are always executed:
+
+1. **Security gate** — conversation ownership check + user-message persist.
+2. **Tool-calling loop** — dispatched to one of two strategies:
+
+   * **Native path** (preferred) — used when the ``LLMProvider`` implements
+     :class:`~cortex.llm.base.SupportsToolCalling`.  Maintains a typed
+     message history and calls
+     :meth:`~cortex.llm.base.SupportsToolCalling.generate_with_tools`
+     so the provider can use its own structured function-calling API
+     (e.g. Gemini ``FunctionDeclaration``).
+
+   * **Prompt-based fallback** — used when the provider does *not* implement
+     ``SupportsToolCalling``.  Embeds tool schemas in the system prompt,
+     parses the LLM's JSON decision string, and feeds observations back as
+     context.  This is identical to the Phase 8 loop.
+
+3. **Grounded final answer** — :class:`~cortex.services.prompt_builder.PromptBuilder`
+   constructs a grounded prompt from the accumulated retrieval chunks, then
+   :class:`~cortex.llm.base.LLMProvider` generates the final citation-grounded
+   answer — **identical path to RAGService**.
 
 Provider agnosticism
 --------------------
-``LLMProvider.generate(prompt)`` takes a plain string.  Tool schemas are
-embedded in the system prompt; the LLM's tool-call decision arrives as a
-JSON string that is parsed with ``json.loads``.  No Gemini SDK specific
-tool-calling features are used here.
-
-Conversation security
----------------------
-When ``conversation_id`` is supplied, the service calls
-:meth:`~cortex.services.conversation.ConversationService.get_conversation`
-before any processing to enforce ownership (raises ``ForbiddenError`` /
-``NotFoundError`` on violations — same behaviour as the existing chat
-endpoint).
+``AgentService`` imports only from :mod:`cortex.agent.types`, never from
+the Gemini SDK.  Gemini-specific types live entirely inside
+:class:`~cortex.llm.gemini.GeminiProvider`.
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ from cortex.agent.prompt import AgentPromptBuilder
 from cortex.agent.registry import ToolRegistry
 from cortex.agent.result import AgentResult, ToolCallRecord
 from cortex.agent.tools.rag_search import RAGSearchTool
+from cortex.agent.types import AgentMessage, ToolCallRequest, ToolResult
 from cortex.core.exceptions import BadRequestError, ServiceUnavailableError
 from cortex.retrieval.models import RetrievalResult
 from cortex.services.prompt_builder import PromptBuilder
@@ -61,7 +64,9 @@ class AgentService:
     Parameters
     ----------
     llm_provider:
-        The application-scoped LLM provider (e.g. GeminiProvider).
+        The application-scoped LLM provider.  If it also implements
+        :class:`~cortex.llm.base.SupportsToolCalling`, the native
+        function-calling path is used automatically.
     tool_registry:
         Registry pre-populated with the available tools.
     prompt_builder:
@@ -131,7 +136,7 @@ class AgentService:
         t_start = time.perf_counter()
 
         # ------------------------------------------------------------------
-        # Step 0: Conversation ownership check (security gate)
+        # Step 0: Conversation ownership check (security gate)  [SHARED]
         # ------------------------------------------------------------------
         if conversation_id and self._conv_service:
             await self._conv_service.get_conversation(
@@ -140,7 +145,7 @@ class AgentService:
             )
 
         # ------------------------------------------------------------------
-        # Step 1: Persist user message
+        # Step 1: Persist user message  [SHARED]
         # ------------------------------------------------------------------
         if conversation_id and self._conv_service:
             await self._conv_service.add_message(
@@ -154,107 +159,29 @@ class AgentService:
             )
 
         # ------------------------------------------------------------------
-        # Step 2: Tool-calling reasoning loop
+        # Step 2: Tool-calling loop — dispatched by provider capability
         # ------------------------------------------------------------------
-        tool_calls: list[ToolCallRecord] = []
-        all_retrieved_chunks: list[RetrievalResult] = []
+        from cortex.llm.base import SupportsToolCalling  # local import avoids cycles
 
-        current_prompt = self._agent_prompt_builder.build_initial(
-            question=question,
-            tool_schemas=self._registry.tool_schemas,
-        )
-
-        loop_count = 0
-        early_final_answer: str | None = None
-
-        while loop_count < self._max_tool_calls:
-            loop_count += 1
+        if isinstance(self._llm, SupportsToolCalling):
             logger.debug(
-                "Agent loop iteration=%d user_id=%s conversation_id=%s",
-                loop_count,
-                user.id,
-                conversation_id,
+                "Agent using native tool-calling path (provider=%s)",
+                type(self._llm).__name__,
+            )
+            tool_calls, all_retrieved_chunks = await self._native_tool_loop(
+                question=question, user=user
+            )
+        else:
+            logger.debug(
+                "Agent using prompt-based tool-calling path (provider=%s)",
+                type(self._llm).__name__,
+            )
+            tool_calls, all_retrieved_chunks = await self._prompt_tool_loop(
+                question=question, user=user
             )
 
-            # Ask the LLM for the next action
-            try:
-                raw_response = await self._llm.generate(current_prompt)
-            except ServiceUnavailableError:
-                raise
-            except Exception as exc:
-                raise ServiceUnavailableError(
-                    "LLM generation failed during agent loop",
-                    details={"reason": str(exc)},
-                ) from exc
-
-            # Parse JSON decision
-            decision = self._parse_decision(raw_response)
-            action = decision.get("action", "")
-
-            if action == "final_answer":
-                early_final_answer = str(decision.get("answer", "")).strip()
-                logger.info(
-                    "Agent reached final_answer after %d tool calls",
-                    len(tool_calls),
-                )
-                break
-
-            if action == "tool_call":
-                tool_name = str(decision.get("tool", "")).strip()
-                tool_args: dict = decision.get("args", {})
-
-                # Dispatch the tool
-                try:
-                    observation = await self._registry.dispatch(
-                        name=tool_name,
-                        args=tool_args,
-                        user=user,
-                    )
-                except BadRequestError as exc:
-                    # Unknown tool or bad args — feed the error back as an
-                    # observation so the LLM can self-correct
-                    observation = f"Tool error: {exc.message}"
-                    tool_name = tool_name or "unknown"
-
-                # Accumulate structured RAG results for citation
-                tool_obj = None
-                with contextlib.suppress(BadRequestError):
-                    tool_obj = self._registry.get_tool(tool_name)
-                if isinstance(tool_obj, RAGSearchTool):
-                    all_retrieved_chunks.extend(tool_obj.last_results)
-
-                tool_calls.append(
-                    ToolCallRecord(
-                        tool_name=tool_name,
-                        args=tool_args,
-                        observation=observation,
-                    )
-                )
-
-                # Extend prompt with this turn's decision + observation
-                current_prompt = self._agent_prompt_builder.build_observation_turn(
-                    previous_prompt=current_prompt,
-                    llm_decision=raw_response,
-                    tool_name=tool_name,
-                    observation=observation,
-                )
-            else:
-                # Unexpected action — treat raw text as the final answer
-                logger.warning(
-                    "Agent returned unexpected action=%r; treating as final answer",
-                    action,
-                )
-                early_final_answer = raw_response.strip()
-                break
-
         # ------------------------------------------------------------------
-        # Step 3: Generate grounded final answer via existing RAG path
-        #
-        # If the agent already declared a final_answer, we still run
-        # PromptBuilder + LLM on the accumulated chunks to produce a
-        # properly grounded, cited response — exactly as RAGService does.
-        # If no chunks were retrieved, PromptBuilder will include the
-        # "no context" note per its existing behaviour.
+        # Step 3: Generate grounded final answer via existing RAG path  [SHARED]
         # ------------------------------------------------------------------
         grounded_prompt = self._prompt_builder.build(
             question=question,
@@ -271,12 +198,6 @@ class AgentService:
                 details={"reason": str(exc)},
             ) from exc
 
-        # If the agent declared an early final answer but we have no retrieved
-        # chunks to ground it, use the agent's declared answer directly to
-        # avoid the "I cannot answer" PromptBuilder disclaimer.
-        if not all_retrieved_chunks and early_final_answer:
-            final_answer = early_final_answer
-
         total_ms = (time.perf_counter() - t_start) * 1000
         logger.info(
             "Agent run complete: user_id=%s conversation_id=%s "
@@ -290,7 +211,7 @@ class AgentService:
         )
 
         # ------------------------------------------------------------------
-        # Step 4: Persist assistant message + token usage (optional)
+        # Step 4: Persist assistant message + token usage (optional)  [SHARED]
         # ------------------------------------------------------------------
         if conversation_id and self._conv_service:
             citation_dicts = [
@@ -321,6 +242,225 @@ class AgentService:
             tool_calls=tool_calls,
             retrieved_chunks=all_retrieved_chunks,
         )
+
+    # ------------------------------------------------------------------
+    # Private — Native tool-calling loop (Phase 9)
+    # ------------------------------------------------------------------
+
+    async def _native_tool_loop(
+        self,
+        *,
+        question: str,
+        user: User,
+    ) -> tuple[list[ToolCallRecord], list[RetrievalResult]]:
+        """Run the tool-calling loop using the provider's native API.
+
+        Maintains a typed :class:`~cortex.agent.types.AgentMessage` history
+        and calls :meth:`~cortex.llm.base.SupportsToolCalling.generate_with_tools`
+        on each iteration.  All Gemini-specific types remain inside the
+        provider; this method is fully provider-agnostic.
+
+        Returns
+        -------
+        tuple[list[ToolCallRecord], list[RetrievalResult]]
+            Tool call trace and accumulated retrieval results.
+        """
+        from cortex.llm.base import SupportsToolCalling
+
+        assert isinstance(self._llm, SupportsToolCalling)  # guaranteed by caller
+
+        tool_calls: list[ToolCallRecord] = []
+        all_retrieved_chunks: list[RetrievalResult] = []
+
+        # Seed conversation history with the user's question
+        messages: list[AgentMessage] = [AgentMessage(role="user", text=question)]
+
+        for iteration in range(self._max_tool_calls):
+            logger.debug(
+                "Agent native loop iteration=%d user_id=%s",
+                iteration + 1,
+                user.id,
+            )
+
+            try:
+                result = await self._llm.generate_with_tools(
+                    messages=messages,
+                    tool_schemas=self._registry.tool_schemas,
+                )
+            except ServiceUnavailableError:
+                raise
+            except Exception as exc:
+                raise ServiceUnavailableError(
+                    "LLM generate_with_tools failed during agent loop",
+                    details={"reason": str(exc)},
+                ) from exc
+
+            if result.is_text:
+                # LLM produced a text response — tool loop is done
+                logger.info(
+                    "Agent native loop: text response after %d tool call(s)",
+                    len(tool_calls),
+                )
+                break
+
+            # LLM requested a tool call
+            tc: ToolCallRequest = result.tool_call  # type: ignore[assignment]
+            tool_name = tc.tool_name
+
+            # Append model's tool-call turn to history
+            messages.append(AgentMessage(role="model", tool_call=tc))
+
+            # Dispatch the tool
+            try:
+                observation = await self._registry.dispatch(
+                    name=tool_name,
+                    args=tc.args,
+                    user=user,
+                )
+            except BadRequestError as exc:
+                observation = f"Tool error: {exc.message}"
+                logger.warning(
+                    "Agent native loop: tool %r raised BadRequestError: %s",
+                    tool_name,
+                    exc.message,
+                )
+
+            # Accumulate structured RAG results for citation
+            tool_obj = None
+            with contextlib.suppress(BadRequestError):
+                tool_obj = self._registry.get_tool(tool_name)
+            if isinstance(tool_obj, RAGSearchTool):
+                all_retrieved_chunks.extend(tool_obj.last_results)
+
+            tool_calls.append(
+                ToolCallRecord(
+                    tool_name=tool_name,
+                    args=tc.args,
+                    observation=observation,
+                )
+            )
+
+            # Append tool result to history so the provider can see it
+            messages.append(
+                AgentMessage(
+                    role="tool",
+                    tool_result=ToolResult(
+                        tool_name=tool_name,
+                        output=observation,
+                        call_id=tc.call_id,
+                    ),
+                )
+            )
+
+        else:
+            logger.warning(
+                "Agent native loop: reached max_tool_calls=%d without text response",
+                self._max_tool_calls,
+            )
+
+        return tool_calls, all_retrieved_chunks
+
+    # ------------------------------------------------------------------
+    # Private — Prompt-based tool-calling loop (Phase 8 fallback)
+    # ------------------------------------------------------------------
+
+    async def _prompt_tool_loop(
+        self,
+        *,
+        question: str,
+        user: User,
+    ) -> tuple[list[ToolCallRecord], list[RetrievalResult]]:
+        """Prompt-based tool-calling loop (Phase 8 fallback).
+
+        Used when the LLM provider does **not** implement
+        :class:`~cortex.llm.base.SupportsToolCalling`.  Embeds tool schemas
+        in the system prompt and parses the LLM's JSON decisions.
+
+        Returns
+        -------
+        tuple[list[ToolCallRecord], list[RetrievalResult]]
+            Tool call trace and accumulated retrieval results.
+        """
+        tool_calls: list[ToolCallRecord] = []
+        all_retrieved_chunks: list[RetrievalResult] = []
+
+        current_prompt = self._agent_prompt_builder.build_initial(
+            question=question,
+            tool_schemas=self._registry.tool_schemas,
+        )
+
+        loop_count = 0
+
+        while loop_count < self._max_tool_calls:
+            loop_count += 1
+            logger.debug(
+                "Agent prompt loop iteration=%d user_id=%s",
+                loop_count,
+                user.id,
+            )
+
+            try:
+                raw_response = await self._llm.generate(current_prompt)
+            except ServiceUnavailableError:
+                raise
+            except Exception as exc:
+                raise ServiceUnavailableError(
+                    "LLM generation failed during agent loop",
+                    details={"reason": str(exc)},
+                ) from exc
+
+            decision = self._parse_decision(raw_response)
+            action = decision.get("action", "")
+
+            if action == "final_answer":
+                logger.info(
+                    "Agent prompt loop: final_answer after %d tool call(s)",
+                    len(tool_calls),
+                )
+                break
+
+            if action == "tool_call":
+                tool_name = str(decision.get("tool", "")).strip()
+                tool_args: dict = decision.get("args", {})
+
+                try:
+                    observation = await self._registry.dispatch(
+                        name=tool_name,
+                        args=tool_args,
+                        user=user,
+                    )
+                except BadRequestError as exc:
+                    observation = f"Tool error: {exc.message}"
+                    tool_name = tool_name or "unknown"
+
+                tool_obj = None
+                with contextlib.suppress(BadRequestError):
+                    tool_obj = self._registry.get_tool(tool_name)
+                if isinstance(tool_obj, RAGSearchTool):
+                    all_retrieved_chunks.extend(tool_obj.last_results)
+
+                tool_calls.append(
+                    ToolCallRecord(
+                        tool_name=tool_name,
+                        args=tool_args,
+                        observation=observation,
+                    )
+                )
+
+                current_prompt = self._agent_prompt_builder.build_observation_turn(
+                    previous_prompt=current_prompt,
+                    llm_decision=raw_response,
+                    tool_name=tool_name,
+                    observation=observation,
+                )
+            else:
+                logger.warning(
+                    "Agent prompt loop: unexpected action=%r; treating as final answer",
+                    action,
+                )
+                break
+
+        return tool_calls, all_retrieved_chunks
 
     # ------------------------------------------------------------------
     # Private helpers
