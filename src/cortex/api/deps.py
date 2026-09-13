@@ -14,6 +14,7 @@ from cortex.core.exceptions import ForbiddenError, UnauthorizedError
 from cortex.core.security import decode_access_token
 from cortex.db.models.user import User
 from cortex.db.session import Database, get_session
+from cortex.embeddings.base import EmbeddingProvider
 from cortex.services.auth import AuthService
 from cortex.services.chunking import ChunkingService
 from cortex.services.cleaning import CleaningService
@@ -23,6 +24,7 @@ from cortex.services.ingestion import IngestionService
 from cortex.services.parser import ParserService
 from cortex.services.storage import StorageService
 from cortex.services.user import UserService
+from cortex.vectorstore.base import VectorStore
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -30,6 +32,16 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 def get_database(request: Request) -> Database:
     """Resolve the application-scoped Database from app state."""
     return request.app.state.database  # type: ignore[no-any-return]
+
+
+def get_embedding_provider(request: Request) -> EmbeddingProvider:
+    """Resolve the application-scoped embedding provider from app state."""
+    return request.app.state.embedding_provider  # type: ignore[no-any-return]
+
+
+def get_vector_store(request: Request) -> VectorStore:
+    """Resolve the application-scoped vector store from app state."""
+    return request.app.state.vector_store  # type: ignore[no-any-return]
 
 
 async def get_db_session(
@@ -75,12 +87,14 @@ def get_document_service(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     settings: Annotated[Settings, Depends(get_settings)],
     storage_service: Annotated[StorageService, Depends(get_storage_service)],
+    vector_store: Annotated[VectorStore, Depends(get_vector_store)],
 ) -> DocumentService:
     """Construct a request-scoped DocumentService."""
     return DocumentService(
         session=session,
         settings=settings,
         storage_service=storage_service,
+        vector_store=vector_store,
     )
 
 
@@ -107,6 +121,8 @@ def get_ingestion_service(
     parser_service: Annotated[ParserService, Depends(get_parser_service)],
     cleaning_service: Annotated[CleaningService, Depends(get_cleaning_service)],
     chunking_service: Annotated[ChunkingService, Depends(get_chunking_service)],
+    embedding_provider: Annotated[EmbeddingProvider, Depends(get_embedding_provider)],
+    vector_store: Annotated[VectorStore, Depends(get_vector_store)],
 ) -> IngestionService:
     """Construct a request-scoped IngestionService."""
     return IngestionService(
@@ -115,6 +131,8 @@ def get_ingestion_service(
         parser_service=parser_service,
         cleaning_service=cleaning_service,
         chunking_service=chunking_service,
+        embedding_provider=embedding_provider,
+        vector_store=vector_store,
     )
 
 

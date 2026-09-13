@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -15,9 +16,12 @@ from cortex.core.security import hash_password
 from cortex.db.models.document import Document, DocumentStatus
 from cortex.db.models.user import User, UserRole
 from cortex.db.session import Database
+from cortex.embeddings.base import EmbeddingProvider
 from cortex.main import create_app
+from cortex.vectorstore.base import VectorStore
 
 MINIMAL_PDF_BYTES = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF"
+EMBEDDING_DIMENSION = 384
 
 
 @pytest.fixture
@@ -38,18 +42,45 @@ def test_settings(tmp_path) -> Settings:
         document_storage_path=str(tmp_path / "documents"),
         document_max_file_size_bytes=26_214_400,
         document_allowed_mime_type="application/pdf",
+        chroma_persist_directory=str(tmp_path / "chroma"),
+        chroma_collection_name="test_document_chunks",
     )
 
 
 @pytest.fixture
-def app(test_settings: Settings) -> FastAPI:
-    """Application instance with settings and a Database attached for DI.
+def mock_embedding_provider() -> EmbeddingProvider:
+    """Fast mock embedding provider for API and service tests."""
+    provider = MagicMock(spec=EmbeddingProvider)
+    provider.embed = AsyncMock(
+        return_value=[0.1] * EMBEDDING_DIMENSION,
+    )
+    provider.embed_batch = AsyncMock(
+        side_effect=lambda texts: [[0.1] * EMBEDDING_DIMENSION for _ in texts],
+    )
+    return provider
 
-    Lifespan is not relied upon here because the installed httpx ASGITransport
-    does not expose a lifespan switch; attaching Database mirrors startup wiring.
-    """
+
+@pytest.fixture
+def mock_vector_store() -> VectorStore:
+    """Fast mock vector store for API and service tests."""
+    store = MagicMock(spec=VectorStore)
+    store.add_chunks = AsyncMock()
+    store.delete_document = AsyncMock()
+    store.similarity_search = AsyncMock(return_value=[])
+    return store
+
+
+@pytest.fixture
+def app(
+    test_settings: Settings,
+    mock_embedding_provider: EmbeddingProvider,
+    mock_vector_store: VectorStore,
+) -> FastAPI:
+    """Application instance with settings and DI state attached for tests."""
     application = create_app(settings=test_settings)
     application.state.database = Database(test_settings)
+    application.state.embedding_provider = mock_embedding_provider
+    application.state.vector_store = mock_vector_store
     return application
 
 

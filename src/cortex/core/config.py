@@ -120,6 +120,27 @@ class Settings(BaseSettings):
         description="Word overlap between consecutive chunks",
     )
 
+    # Embeddings
+    embedding_model_name: str = Field(
+        default="BAAI/bge-small-en-v1.5",
+        description="Sentence-transformers model used for chunk embeddings",
+    )
+    embedding_batch_size: int = Field(
+        default=32,
+        ge=1,
+        description="Batch size for embedding generation",
+    )
+
+    # Vector store (ChromaDB)
+    chroma_persist_directory: str = Field(
+        default="storage/chroma",
+        description="Persistent directory for ChromaDB data",
+    )
+    chroma_collection_name: str = Field(
+        default="document_chunks",
+        description="Chroma collection name for document chunk vectors",
+    )
+
     @field_validator("database_url")
     @classmethod
     def validate_database_url(cls, value: str) -> str:

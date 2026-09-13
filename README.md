@@ -59,6 +59,17 @@ Uploaded files are stored under `storage/documents/` (configurable via `DOCUMENT
 
 Status flow: `uploaded` → `processing` → `ready` (or `failed` on error).
 
+## Embeddings & vector store (Phase 4)
+
+During processing, each chunk is embedded with `sentence-transformers` (default: `BAAI/bge-small-en-v1.5`) and stored in persistent ChromaDB. Chunk text remains in PostgreSQL; Chroma stores embeddings plus `chunk_id`, `document_id`, and `chunk_index` metadata only.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `EMBEDDING_MODEL_NAME` | `BAAI/bge-small-en-v1.5` | Sentence-transformers model |
+| `EMBEDDING_BATCH_SIZE` | `32` | Embedding batch size |
+| `CHROMA_PERSIST_DIRECTORY` | `storage/chroma` | ChromaDB data directory |
+| `CHROMA_COLLECTION_NAME` | `document_chunks` | Chroma collection name |
+
 ## Project layout
 
 ```

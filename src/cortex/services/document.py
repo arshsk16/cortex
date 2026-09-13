@@ -14,6 +14,7 @@ from cortex.db.models.document import Document, DocumentStatus
 from cortex.db.models.user import User
 from cortex.schemas.document import DocumentList, DocumentRead
 from cortex.services.storage import PDF_EXTENSION, StorageService
+from cortex.vectorstore.base import VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +29,12 @@ class DocumentService:
         session: AsyncSession,
         settings: Settings,
         storage_service: StorageService,
+        vector_store: VectorStore,
     ) -> None:
         self._session = session
         self._settings = settings
         self._storage = storage_service
+        self._vector_store = vector_store
 
     async def upload(
         self,
@@ -124,10 +127,11 @@ class DocumentService:
         )
 
     async def delete(self, *, document_id: str, user: User) -> None:
-        """Delete a user-owned document and its stored file."""
+        """Delete a user-owned document, its vectors, and stored file."""
         document = await self._get_owned_document(document_id=document_id, user=user)
         storage_path = document.storage_path
 
+        await self._vector_store.delete_document(document.id)
         await self._session.delete(document)
         await self._session.flush()
         await self._storage.delete(storage_path)

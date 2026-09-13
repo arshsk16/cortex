@@ -55,3 +55,6 @@ uv.lock.bak
 
 # Uploaded documents (local storage)
 storage/documents/
+
+# Chroma vector store
+storage/chroma/

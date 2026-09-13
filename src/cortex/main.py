@@ -15,6 +15,8 @@ from cortex.core.config import Settings, get_settings
 from cortex.core.exceptions import register_exception_handlers
 from cortex.core.logging import configure_logging
 from cortex.db.session import Database
+from cortex.embeddings.factory import create_embedding_provider
+from cortex.vectorstore.factory import create_vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +26,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown resources."""
     settings: Settings = app.state.settings
     database = Database(settings)
+    embedding_provider = create_embedding_provider(settings)
+    vector_store = create_vector_store(settings)
     app.state.database = database
+    app.state.embedding_provider = embedding_provider
+    app.state.vector_store = vector_store
     logger.info(
-        "Cortex started (env=%s, version=%s)",
+        "Cortex started (env=%s, version=%s, embedding_model=%s)",
         settings.app_env,
         settings.app_version,
+        settings.embedding_model_name,
     )
     try:
         yield

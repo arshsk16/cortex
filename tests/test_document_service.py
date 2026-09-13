@@ -15,6 +15,7 @@ from cortex.db.models.user import User
 from cortex.schemas.document import DocumentRead
 from cortex.services.document import DocumentService
 from cortex.services.storage import StorageService
+from cortex.vectorstore.base import VectorStore
 
 
 def _make_document_service(
@@ -22,18 +23,22 @@ def _make_document_service(
     test_settings: Settings,
     session: AsyncMock | None = None,
     storage: AsyncMock | None = None,
-) -> tuple[DocumentService, AsyncMock, AsyncMock]:
+    vector_store: AsyncMock | None = None,
+) -> tuple[DocumentService, AsyncMock, AsyncMock, AsyncMock]:
     session = session or AsyncMock()
     storage = storage or AsyncMock(spec=StorageService)
+    vector_store = vector_store or AsyncMock(spec=VectorStore)
     storage.generate_storage_filename = MagicMock(return_value=f"{uuid4()}.pdf")
     storage.save = AsyncMock(return_value="storage/documents/test.pdf")
     storage.delete = AsyncMock()
+    vector_store.delete_document = AsyncMock()
     service = DocumentService(
         session=session,
         settings=test_settings,
         storage_service=storage,
+        vector_store=vector_store,
     )
-    return service, session, storage
+    return service, session, storage, vector_store
 
 
 @pytest.mark.asyncio
@@ -43,7 +48,7 @@ async def test_upload_persists_document(
     minimal_pdf_bytes: bytes,
 ) -> None:
     """Valid PDF uploads are stored and persisted with UPLOADED status."""
-    service, session, storage = _make_document_service(test_settings=test_settings)
+    service, session, storage, _ = _make_document_service(test_settings=test_settings)
     session.add = MagicMock()
     session.refresh = AsyncMock()
 
@@ -80,7 +85,7 @@ async def test_upload_rejects_non_pdf_mime(
     minimal_pdf_bytes: bytes,
 ) -> None:
     """Non-PDF MIME types are rejected."""
-    service, _, _ = _make_document_service(test_settings=test_settings)
+    service, _, _, _ = _make_document_service(test_settings=test_settings)
 
     with pytest.raises(BadRequestError) as exc_info:
         await service.upload(
@@ -102,7 +107,7 @@ async def test_upload_rejects_oversized_file(
     small_settings = test_settings.model_copy(
         update={"document_max_file_size_bytes": 10},
     )
-    service, _, _ = _make_document_service(test_settings=small_settings)
+    service, _, _, _ = _make_document_service(test_settings=small_settings)
 
     with pytest.raises(BadRequestError) as exc_info:
         await service.upload(
@@ -120,7 +125,7 @@ async def test_upload_rejects_invalid_pdf_magic(
     sample_user: User,
 ) -> None:
     """Files without PDF magic bytes are rejected."""
-    service, _, _ = _make_document_service(test_settings=test_settings)
+    service, _, _, _ = _make_document_service(test_settings=test_settings)
 
     with pytest.raises(BadRequestError) as exc_info:
         await service.upload(
@@ -139,7 +144,7 @@ async def test_get_returns_owned_document(
     sample_document: Document,
 ) -> None:
     """Owners can retrieve their documents."""
-    service, session, _ = _make_document_service(test_settings=test_settings)
+    service, session, _, _ = _make_document_service(test_settings=test_settings)
     session.execute = AsyncMock(
         return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=sample_document))
     )
@@ -154,7 +159,7 @@ async def test_get_raises_for_missing_or_foreign_document(
     sample_user: User,
 ) -> None:
     """Missing or foreign documents raise NotFoundError."""
-    service, session, _ = _make_document_service(test_settings=test_settings)
+    service, session, _, _ = _make_document_service(test_settings=test_settings)
     session.execute = AsyncMock(
         return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None))
     )
@@ -170,7 +175,7 @@ async def test_list_returns_paginated_documents(
     sample_document: Document,
 ) -> None:
     """List returns owned documents with pagination metadata."""
-    service, session, _ = _make_document_service(test_settings=test_settings)
+    service, session, _, _ = _make_document_service(test_settings=test_settings)
     list_result = MagicMock(
         scalars=MagicMock(return_value=MagicMock(all=lambda: [sample_document])),
     )
@@ -193,8 +198,10 @@ async def test_delete_removes_record_and_file(
     sample_user: User,
     sample_document: Document,
 ) -> None:
-    """Delete removes the database row and stored file."""
-    service, session, storage = _make_document_service(test_settings=test_settings)
+    """Delete removes vectors, the database row, and stored file."""
+    service, session, storage, vector_store = _make_document_service(
+        test_settings=test_settings,
+    )
     session.execute = AsyncMock(
         return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=sample_document))
     )
@@ -203,5 +210,6 @@ async def test_delete_removes_record_and_file(
 
     await service.delete(document_id=sample_document.id, user=sample_user)
 
+    vector_store.delete_document.assert_awaited_once_with(sample_document.id)
     session.delete.assert_awaited_once_with(sample_document)
     storage.delete.assert_awaited_once_with(sample_document.storage_path)
