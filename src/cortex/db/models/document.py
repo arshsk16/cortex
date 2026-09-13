@@ -11,6 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from cortex.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
+    from cortex.db.models.document_chunk import DocumentChunk
     from cortex.db.models.user import User
 
 
@@ -56,6 +57,11 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     user: Mapped[User] = relationship(back_populates="documents")
+    chunks: Mapped[list[DocumentChunk]] = relationship(
+        back_populates="document",
+        cascade="all, delete-orphan",
+        order_by="DocumentChunk.chunk_index",
+    )
 
     def __repr__(self) -> str:
         return (

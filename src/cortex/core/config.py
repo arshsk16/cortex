@@ -108,6 +108,18 @@ class Settings(BaseSettings):
         description="Allowed MIME type for document uploads",
     )
 
+    # Document ingestion
+    ingestion_chunk_size_words: int = Field(
+        default=500,
+        ge=50,
+        description="Target chunk size in words",
+    )
+    ingestion_chunk_overlap_words: int = Field(
+        default=75,
+        ge=0,
+        description="Word overlap between consecutive chunks",
+    )
+
     @field_validator("database_url")
     @classmethod
     def validate_database_url(cls, value: str) -> str:

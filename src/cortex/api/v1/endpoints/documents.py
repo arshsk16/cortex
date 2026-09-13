@@ -6,8 +6,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Query, UploadFile, status
 
-from cortex.api.deps import CurrentActiveUserDep, DocumentServiceDep
+from cortex.api.deps import (
+    CurrentActiveUserDep,
+    DocumentServiceDep,
+    IngestionServiceDep,
+)
 from cortex.schemas.document import DocumentList, DocumentResponse
+from cortex.schemas.ingestion import DocumentProcessResponse
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
@@ -110,3 +115,28 @@ async def delete_document(
 ) -> None:
     """Delete an owned document."""
     await document_service.delete(document_id=document_id, user=current_user)
+
+
+@router.post(
+    "/{document_id}/process",
+    response_model=DocumentProcessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Process document",
+    description=(
+        "Extract text from an owned PDF, clean and chunk it, and persist chunks. "
+        "Reprocessing replaces any existing chunks for the document."
+    ),
+    responses={
+        200: {"description": "Document processed successfully"},
+        401: {"description": "Not authenticated"},
+        404: {"description": "Document not found"},
+        422: {"description": "Document processing failed"},
+    },
+)
+async def process_document(
+    document_id: str,
+    current_user: CurrentActiveUserDep,
+    ingestion_service: IngestionServiceDep,
+) -> DocumentProcessResponse:
+    """Run the ingestion pipeline for an owned document."""
+    return await ingestion_service.process(document_id=document_id, user=current_user)

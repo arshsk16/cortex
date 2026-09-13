@@ -15,8 +15,12 @@ from cortex.core.security import decode_access_token
 from cortex.db.models.user import User
 from cortex.db.session import Database, get_session
 from cortex.services.auth import AuthService
+from cortex.services.chunking import ChunkingService
+from cortex.services.cleaning import CleaningService
 from cortex.services.document import DocumentService
 from cortex.services.health import HealthService
+from cortex.services.ingestion import IngestionService
+from cortex.services.parser import ParserService
 from cortex.services.storage import StorageService
 from cortex.services.user import UserService
 
@@ -80,6 +84,40 @@ def get_document_service(
     )
 
 
+def get_parser_service() -> ParserService:
+    """Construct a ParserService."""
+    return ParserService()
+
+
+def get_cleaning_service() -> CleaningService:
+    """Construct a CleaningService."""
+    return CleaningService()
+
+
+def get_chunking_service(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ChunkingService:
+    """Construct a ChunkingService bound to ingestion settings."""
+    return ChunkingService(settings)
+
+
+def get_ingestion_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    storage_service: Annotated[StorageService, Depends(get_storage_service)],
+    parser_service: Annotated[ParserService, Depends(get_parser_service)],
+    cleaning_service: Annotated[CleaningService, Depends(get_cleaning_service)],
+    chunking_service: Annotated[ChunkingService, Depends(get_chunking_service)],
+) -> IngestionService:
+    """Construct a request-scoped IngestionService."""
+    return IngestionService(
+        session=session,
+        storage_service=storage_service,
+        parser_service=parser_service,
+        cleaning_service=cleaning_service,
+        chunking_service=chunking_service,
+    )
+
+
 async def get_current_user(
     credentials: Annotated[
         HTTPAuthorizationCredentials | None,
@@ -117,5 +155,6 @@ UserServiceDep = Annotated[UserService, Depends(get_user_service)]
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 StorageServiceDep = Annotated[StorageService, Depends(get_storage_service)]
 DocumentServiceDep = Annotated[DocumentService, Depends(get_document_service)]
+IngestionServiceDep = Annotated[IngestionService, Depends(get_ingestion_service)]
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 CurrentActiveUserDep = Annotated[User, Depends(get_current_active_user)]

@@ -51,6 +51,14 @@ Set a strong `JWT_SECRET_KEY` (min 32 characters) in `.env` before deploying.
 
 Uploaded files are stored under `storage/documents/` (configurable via `DOCUMENT_STORAGE_PATH`).
 
+## Document ingestion (Phase 3)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/documents/{id}/process` | Extract, clean, chunk PDF; store chunks |
+
+Status flow: `uploaded` → `processing` → `ready` (or `failed` on error).
+
 ## Project layout
 
 ```

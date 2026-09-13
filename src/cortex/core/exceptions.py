@@ -98,6 +98,18 @@ class BadRequestError(CortexError):
         super().__init__(message, code="bad_request", details=details)
 
 
+class DocumentProcessingError(CortexError):
+    """Raised when PDF ingestion or text extraction fails."""
+
+    def __init__(
+        self,
+        message: str = "Document processing failed",
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, code="document_processing_error", details=details)
+
+
 def _error_body(
     *,
     code: str,
@@ -125,6 +137,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             "unauthorized": status.HTTP_401_UNAUTHORIZED,
             "forbidden": status.HTTP_403_FORBIDDEN,
             "bad_request": status.HTTP_400_BAD_REQUEST,
+            "document_processing_error": status.HTTP_422_UNPROCESSABLE_CONTENT,
         }
         headers: dict[str, str] | None = None
         if exc.code == "unauthorized":
