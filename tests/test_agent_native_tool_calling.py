@@ -581,7 +581,7 @@ class TestNativeConversationSecurity:
     async def test_ownership_check_before_any_tool_call(self) -> None:
         """Security gate must fire before generate_with_tools is ever called."""
         conv_service = MagicMock()
-        conv_service.get_conversation = AsyncMock(
+        conv_service.get_history = AsyncMock(
             side_effect=ForbiddenError("Not your conversation")
         )
 
@@ -607,6 +607,7 @@ class TestNativeConversationSecurity:
 class TestNativeConversationPersistence:
     async def test_messages_persisted_after_native_run(self) -> None:
         conv_service = MagicMock()
+        conv_service.get_history = AsyncMock(return_value=[])  # Phase 10
         conv_service.get_conversation = AsyncMock(return_value=MagicMock())
         conv_service.add_message = AsyncMock()
         conv_service.set_auto_title_if_needed = AsyncMock()

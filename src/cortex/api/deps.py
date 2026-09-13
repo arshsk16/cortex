@@ -255,6 +255,7 @@ def get_agent_service(
         prompt_builder=prompt_builder,
         conversation_service=conv_service,
         max_tool_calls=settings.agent_max_tool_calls,
+        conversation_history_limit=settings.conversation_history_limit,
     )
 
 

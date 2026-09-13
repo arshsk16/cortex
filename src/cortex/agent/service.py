@@ -1,34 +1,55 @@
 """Agent orchestration service — single-agent + tool-calling loop.
 
-Architecture (Phase 9)
-----------------------
-``AgentService.run()`` has three shared sections that are always executed:
+Architecture (Phase 10)
+-----------------------
+``AgentService.run()`` has four phases, all sharing a single
+:class:`~cortex.agent.state.AgentState` object:
 
-1. **Security gate** — conversation ownership check + user-message persist.
+1. **Build state** — security gate, load bounded conversation history,
+   persist user message, construct :class:`~cortex.agent.state.AgentState`.
+
 2. **Tool-calling loop** — dispatched to one of two strategies:
 
    * **Native path** (preferred) — used when the ``LLMProvider`` implements
      :class:`~cortex.llm.base.SupportsToolCalling`.  Maintains a typed
      message history and calls
-     :meth:`~cortex.llm.base.SupportsToolCalling.generate_with_tools`
-     so the provider can use its own structured function-calling API
-     (e.g. Gemini ``FunctionDeclaration``).
+     :meth:`~cortex.llm.base.SupportsToolCalling.generate_with_tools`.
 
    * **Prompt-based fallback** — used when the provider does *not* implement
-     ``SupportsToolCalling``.  Embeds tool schemas in the system prompt,
-     parses the LLM's JSON decision string, and feeds observations back as
-     context.  This is identical to the Phase 8 loop.
+     ``SupportsToolCalling``.  Embeds tool schemas in the system prompt and
+     parses the LLM's JSON decision.  Identical to the Phase 8 loop.
 
-3. **Grounded final answer** — :class:`~cortex.services.prompt_builder.PromptBuilder`
-   constructs a grounded prompt from the accumulated retrieval chunks, then
-   :class:`~cortex.llm.base.LLMProvider` generates the final citation-grounded
-   answer — **identical path to RAGService**.
+   Both strategies write their results into ``state.tool_calls`` and
+   ``state.retrieved_chunks``.
+
+3. **Grounded final answer** —
+   :class:`~cortex.services.prompt_builder.PromptBuilder` constructs a
+   grounded prompt from the accumulated retrieval chunks **and the loaded
+   conversation history**, then :class:`~cortex.llm.base.LLMProvider`
+   generates the final citation-grounded answer.
+
+4. **Persist** — assistant message and token usage are written back to the
+   conversation if one was provided.
+
+Memory boundaries
+-----------------
+* ``state.history``  — previous ``Message`` rows from the DB, bounded by
+  ``conversation_history_limit``.  Injected into the **final grounded-answer
+  prompt only** (``PromptBuilder``).  Never passed to the tool-calling loop
+  to prevent compounding unverified context into tool decisions.
+* ``state.retrieved_chunks`` — live RAG results from this run's tool calls.
+  Always authoritative; used for citation construction and context grounding.
 
 Provider agnosticism
 --------------------
-``AgentService`` imports only from :mod:`cortex.agent.types`, never from
-the Gemini SDK.  Gemini-specific types live entirely inside
-:class:`~cortex.llm.gemini.GeminiProvider`.
+``AgentService`` imports only from :mod:`cortex.agent.types` and
+:mod:`cortex.agent.state`, never from the Gemini SDK.
+
+Conversation security
+---------------------
+When ``conversation_id`` is supplied, :meth:`get_history` enforces ownership
+(raises ``ForbiddenError`` / ``NotFoundError``).  History is loaded **before**
+any tool call, so an ownership violation aborts the entire run.
 """
 
 from __future__ import annotations
@@ -36,16 +57,15 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import time
 from typing import TYPE_CHECKING
 
 from cortex.agent.prompt import AgentPromptBuilder
 from cortex.agent.registry import ToolRegistry
 from cortex.agent.result import AgentResult, ToolCallRecord
+from cortex.agent.state import AgentState
 from cortex.agent.tools.rag_search import RAGSearchTool
 from cortex.agent.types import AgentMessage, ToolCallRequest, ToolResult
 from cortex.core.exceptions import BadRequestError, ServiceUnavailableError
-from cortex.retrieval.models import RetrievalResult
 from cortex.services.prompt_builder import PromptBuilder
 
 if TYPE_CHECKING:
@@ -56,10 +76,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_TOOL_CALLS = 5
+_DEFAULT_HISTORY_LIMIT = 10
 
 
 class AgentService:
-    """Orchestrate a single-agent + tool-calling loop.
+    """Orchestrate a single-agent + tool-calling loop with conversation memory.
 
     Parameters
     ----------
@@ -72,11 +93,16 @@ class AgentService:
     prompt_builder:
         The existing PromptBuilder used for the final grounded-answer step.
     conversation_service:
-        Optional — when supplied, the agent enforces conversation ownership
-        and persists the user/assistant message pair.
+        Optional — when supplied, the agent enforces conversation ownership,
+        loads bounded conversation history, and persists the user/assistant
+        message pair.
     max_tool_calls:
         Maximum number of tool invocations per agent run.  Prevents infinite
         loops in case the LLM keeps requesting tools.
+    conversation_history_limit:
+        Maximum number of previous messages loaded from the database to
+        include as conversation memory in the grounded-answer prompt.
+        Bounded to prevent unbounded context growth.  Defaults to 10.
     """
 
     def __init__(
@@ -87,12 +113,14 @@ class AgentService:
         prompt_builder: PromptBuilder,
         conversation_service: ConversationService | None = None,
         max_tool_calls: int = _DEFAULT_MAX_TOOL_CALLS,
+        conversation_history_limit: int = _DEFAULT_HISTORY_LIMIT,
     ) -> None:
         self._llm = llm_provider
         self._registry = tool_registry
         self._prompt_builder = prompt_builder
         self._conv_service = conversation_service
         self._max_tool_calls = max_tool_calls
+        self._history_limit = conversation_history_limit
         self._agent_prompt_builder = AgentPromptBuilder()
 
     # ------------------------------------------------------------------
@@ -116,8 +144,8 @@ class AgentService:
             Authenticated owner — passed through to every tool for ownership
             enforcement.
         conversation_id:
-            When set, ownership is verified against this conversation before
-            any processing, and the user/assistant messages are persisted on
+            When set, ownership is verified, bounded conversation history is
+            loaded, and the user/assistant messages are persisted on
             completion.
 
         Returns
@@ -133,59 +161,49 @@ class AgentService:
                 details={"field": "question"},
             )
 
-        t_start = time.perf_counter()
+        # ------------------------------------------------------------------
+        # Phase 1: Build AgentState
+        #   a) Load bounded history (ownership enforced inside get_history)
+        #   b) Persist user message
+        #   c) Construct AgentState with all context for this run
+        # ------------------------------------------------------------------
+        state = await self._build_state(
+            question=question,
+            user=user,
+            conversation_id=conversation_id,
+        )
 
         # ------------------------------------------------------------------
-        # Step 0: Conversation ownership check (security gate)  [SHARED]
+        # Phase 2: Tool-calling loop — dispatched by provider capability
         # ------------------------------------------------------------------
-        if conversation_id and self._conv_service:
-            await self._conv_service.get_conversation(
-                conversation_id=conversation_id,
-                user_id=user.id,
-            )
-
-        # ------------------------------------------------------------------
-        # Step 1: Persist user message  [SHARED]
-        # ------------------------------------------------------------------
-        if conversation_id and self._conv_service:
-            await self._conv_service.add_message(
-                conversation_id=conversation_id,
-                role="user",
-                content=question,
-            )
-            await self._conv_service.set_auto_title_if_needed(
-                conversation_id=conversation_id,
-                first_message=question,
-            )
-
-        # ------------------------------------------------------------------
-        # Step 2: Tool-calling loop — dispatched by provider capability
-        # ------------------------------------------------------------------
-        from cortex.llm.base import SupportsToolCalling  # local import avoids cycles
+        from cortex.llm.base import SupportsToolCalling  # local → avoids cycle
 
         if isinstance(self._llm, SupportsToolCalling):
             logger.debug(
                 "Agent using native tool-calling path (provider=%s)",
                 type(self._llm).__name__,
             )
-            tool_calls, all_retrieved_chunks = await self._native_tool_loop(
-                question=question, user=user
-            )
+            await self._native_tool_loop(state=state)
         else:
             logger.debug(
                 "Agent using prompt-based tool-calling path (provider=%s)",
                 type(self._llm).__name__,
             )
-            tool_calls, all_retrieved_chunks = await self._prompt_tool_loop(
-                question=question, user=user
-            )
+            await self._prompt_tool_loop(state=state)
 
         # ------------------------------------------------------------------
-        # Step 3: Generate grounded final answer via existing RAG path  [SHARED]
+        # Phase 3: Generate grounded final answer
+        #   Pass conversation history so the LLM can maintain context/tone.
+        #   Retrieved chunks remain the authoritative evidence section.
+        #
+        #   Memory boundary:
+        #     state.history  → PromptBuilder history section (context/memory)
+        #     state.retrieved_chunks → PromptBuilder context section (evidence)
         # ------------------------------------------------------------------
         grounded_prompt = self._prompt_builder.build(
             question=question,
-            retrieved_chunks=all_retrieved_chunks,
+            retrieved_chunks=state.retrieved_chunks,
+            history=state.history if state.has_history else None,
         )
 
         try:
@@ -198,20 +216,19 @@ class AgentService:
                 details={"reason": str(exc)},
             ) from exc
 
-        total_ms = (time.perf_counter() - t_start) * 1000
         logger.info(
             "Agent run complete: user_id=%s conversation_id=%s "
-            "tool_calls=%d chunks=%d total_ms=%.1f answer_len=%d",
+            "tool_calls=%d chunks=%d history=%d elapsed_ms=%.1f",
             user.id,
             conversation_id,
-            len(tool_calls),
-            len(all_retrieved_chunks),
-            total_ms,
-            len(final_answer),
+            state.total_tool_calls,
+            len(state.retrieved_chunks),
+            len(state.history),
+            state.elapsed_ms,
         )
 
         # ------------------------------------------------------------------
-        # Step 4: Persist assistant message + token usage (optional)  [SHARED]
+        # Phase 4: Persist assistant message + token usage
         # ------------------------------------------------------------------
         if conversation_id and self._conv_service:
             citation_dicts = [
@@ -220,7 +237,7 @@ class AgentService:
                     "chunk_id": c.chunk_id,
                     "chunk_index": c.chunk_index,
                 }
-                for c in all_retrieved_chunks
+                for c in state.retrieved_chunks
             ]
             await self._conv_service.add_message(
                 conversation_id=conversation_id,
@@ -239,47 +256,83 @@ class AgentService:
 
         return AgentResult(
             answer=final_answer,
-            tool_calls=tool_calls,
-            retrieved_chunks=all_retrieved_chunks,
+            tool_calls=state.tool_calls,
+            retrieved_chunks=state.retrieved_chunks,
+        )
+
+    # ------------------------------------------------------------------
+    # Private — State construction
+    # ------------------------------------------------------------------
+
+    async def _build_state(
+        self,
+        *,
+        question: str,
+        user: User,
+        conversation_id: str | None,
+    ) -> AgentState:
+        """Build the initial AgentState for this run.
+
+        Loads bounded conversation history (enforcing ownership) and persists
+        the user's message before constructing the state object.
+        """
+        history = []
+
+        if conversation_id and self._conv_service:
+            # Load history first (get_history enforces ownership internally)
+            history = await self._conv_service.get_history(
+                conversation_id=conversation_id,
+                user_id=user.id,
+                limit=self._history_limit,
+            )
+            logger.debug(
+                "Loaded conversation history: conversation_id=%s messages=%d",
+                conversation_id,
+                len(history),
+            )
+
+            # Persist the incoming user message
+            await self._conv_service.add_message(
+                conversation_id=conversation_id,
+                role="user",
+                content=question,
+            )
+            await self._conv_service.set_auto_title_if_needed(
+                conversation_id=conversation_id,
+                first_message=question,
+            )
+
+        return AgentState(
+            question=question,
+            user=user,
+            conversation_id=conversation_id,
+            history=history,
         )
 
     # ------------------------------------------------------------------
     # Private — Native tool-calling loop (Phase 9)
     # ------------------------------------------------------------------
 
-    async def _native_tool_loop(
-        self,
-        *,
-        question: str,
-        user: User,
-    ) -> tuple[list[ToolCallRecord], list[RetrievalResult]]:
+    async def _native_tool_loop(self, *, state: AgentState) -> None:
         """Run the tool-calling loop using the provider's native API.
 
-        Maintains a typed :class:`~cortex.agent.types.AgentMessage` history
-        and calls :meth:`~cortex.llm.base.SupportsToolCalling.generate_with_tools`
-        on each iteration.  All Gemini-specific types remain inside the
-        provider; this method is fully provider-agnostic.
-
-        Returns
-        -------
-        tuple[list[ToolCallRecord], list[RetrievalResult]]
-            Tool call trace and accumulated retrieval results.
+        Writes results into ``state.tool_calls`` and
+        ``state.retrieved_chunks`` in-place.
         """
         from cortex.llm.base import SupportsToolCalling
 
         assert isinstance(self._llm, SupportsToolCalling)  # guaranteed by caller
 
-        tool_calls: list[ToolCallRecord] = []
-        all_retrieved_chunks: list[RetrievalResult] = []
-
         # Seed conversation history with the user's question
-        messages: list[AgentMessage] = [AgentMessage(role="user", text=question)]
+        messages: list[AgentMessage] = [
+            AgentMessage(role="user", text=state.question)
+        ]
 
         for iteration in range(self._max_tool_calls):
             logger.debug(
                 "Agent native loop iteration=%d user_id=%s",
                 iteration + 1,
-                user.id,
+                state.user.id,
             )
 
             try:
@@ -296,10 +349,9 @@ class AgentService:
                 ) from exc
 
             if result.is_text:
-                # LLM produced a text response — tool loop is done
                 logger.info(
                     "Agent native loop: text response after %d tool call(s)",
-                    len(tool_calls),
+                    state.total_tool_calls,
                 )
                 break
 
@@ -315,7 +367,7 @@ class AgentService:
                 observation = await self._registry.dispatch(
                     name=tool_name,
                     args=tc.args,
-                    user=user,
+                    user=state.user,
                 )
             except BadRequestError as exc:
                 observation = f"Tool error: {exc.message}"
@@ -330,9 +382,9 @@ class AgentService:
             with contextlib.suppress(BadRequestError):
                 tool_obj = self._registry.get_tool(tool_name)
             if isinstance(tool_obj, RAGSearchTool):
-                all_retrieved_chunks.extend(tool_obj.last_results)
+                state.retrieved_chunks.extend(tool_obj.last_results)
 
-            tool_calls.append(
+            state.tool_calls.append(
                 ToolCallRecord(
                     tool_name=tool_name,
                     args=tc.args,
@@ -358,34 +410,22 @@ class AgentService:
                 self._max_tool_calls,
             )
 
-        return tool_calls, all_retrieved_chunks
-
     # ------------------------------------------------------------------
     # Private — Prompt-based tool-calling loop (Phase 8 fallback)
     # ------------------------------------------------------------------
 
-    async def _prompt_tool_loop(
-        self,
-        *,
-        question: str,
-        user: User,
-    ) -> tuple[list[ToolCallRecord], list[RetrievalResult]]:
+    async def _prompt_tool_loop(self, *, state: AgentState) -> None:
         """Prompt-based tool-calling loop (Phase 8 fallback).
 
         Used when the LLM provider does **not** implement
         :class:`~cortex.llm.base.SupportsToolCalling`.  Embeds tool schemas
         in the system prompt and parses the LLM's JSON decisions.
 
-        Returns
-        -------
-        tuple[list[ToolCallRecord], list[RetrievalResult]]
-            Tool call trace and accumulated retrieval results.
+        Writes results into ``state.tool_calls`` and
+        ``state.retrieved_chunks`` in-place.
         """
-        tool_calls: list[ToolCallRecord] = []
-        all_retrieved_chunks: list[RetrievalResult] = []
-
         current_prompt = self._agent_prompt_builder.build_initial(
-            question=question,
+            question=state.question,
             tool_schemas=self._registry.tool_schemas,
         )
 
@@ -396,7 +436,7 @@ class AgentService:
             logger.debug(
                 "Agent prompt loop iteration=%d user_id=%s",
                 loop_count,
-                user.id,
+                state.user.id,
             )
 
             try:
@@ -415,7 +455,7 @@ class AgentService:
             if action == "final_answer":
                 logger.info(
                     "Agent prompt loop: final_answer after %d tool call(s)",
-                    len(tool_calls),
+                    state.total_tool_calls,
                 )
                 break
 
@@ -427,7 +467,7 @@ class AgentService:
                     observation = await self._registry.dispatch(
                         name=tool_name,
                         args=tool_args,
-                        user=user,
+                        user=state.user,
                     )
                 except BadRequestError as exc:
                     observation = f"Tool error: {exc.message}"
@@ -437,9 +477,9 @@ class AgentService:
                 with contextlib.suppress(BadRequestError):
                     tool_obj = self._registry.get_tool(tool_name)
                 if isinstance(tool_obj, RAGSearchTool):
-                    all_retrieved_chunks.extend(tool_obj.last_results)
+                    state.retrieved_chunks.extend(tool_obj.last_results)
 
-                tool_calls.append(
+                state.tool_calls.append(
                     ToolCallRecord(
                         tool_name=tool_name,
                         args=tool_args,
@@ -460,8 +500,6 @@ class AgentService:
                 )
                 break
 
-        return tool_calls, all_retrieved_chunks
-
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -479,7 +517,9 @@ class AgentService:
         if text.startswith("```"):
             lines = text.splitlines()
             # Drop first (```json or ```) and last (```) lines
-            inner_lines = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
+            inner_lines = (
+                lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
+            )
             text = "\n".join(inner_lines).strip()
 
         try:

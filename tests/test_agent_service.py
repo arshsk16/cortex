@@ -73,6 +73,7 @@ def mock_doc_service():
 def mock_conv_service():
     """ConversationService mock that passes ownership checks."""
     svc = MagicMock()
+    svc.get_history = AsyncMock(return_value=[])  # Phase 10: history gate
     svc.get_conversation = AsyncMock(return_value=MagicMock(id="conv-1"))
     svc.add_message = AsyncMock()
     svc.set_auto_title_if_needed = AsyncMock()
@@ -362,7 +363,7 @@ class TestAgentConversationSecurity:
     async def test_ownership_check_called_before_any_processing(
         self, mock_llm_provider, mock_retriever, mock_conv_service, sample_user
     ) -> None:
-        """get_conversation must be called first so ownership errors abort early."""
+        """get_history must be called first so ownership errors abort early."""
         mock_llm_provider.generate = AsyncMock(
             side_effect=[
                 json.dumps({"action": "final_answer", "answer": "Hello."}),
@@ -378,19 +379,22 @@ class TestAgentConversationSecurity:
             conversation_id="conv-1",
         )
 
-        mock_conv_service.get_conversation.assert_called_once_with(
+        # Phase 10: ownership is enforced via get_history (which calls get_conversation
+        # internally in the real ConversationService)
+        mock_conv_service.get_history.assert_called_once_with(
             conversation_id="conv-1",
             user_id=sample_user.id,
+            limit=10,
         )
 
     async def test_forbidden_conversation_blocks_processing(
         self, mock_llm_provider, mock_retriever, sample_user
     ) -> None:
-        """A ForbiddenError from get_conversation must propagate immediately."""
+        """A ForbiddenError from get_history must propagate immediately."""
         from cortex.core.exceptions import ForbiddenError
 
         conv_service = MagicMock()
-        conv_service.get_conversation = AsyncMock(
+        conv_service.get_history = AsyncMock(
             side_effect=ForbiddenError("You do not own this conversation")
         )
 

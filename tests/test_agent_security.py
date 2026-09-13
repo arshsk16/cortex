@@ -225,7 +225,7 @@ async def test_ownership_check_blocks_tool_execution(sample_user: User) -> None:
 
     # Conversation service that always denies access
     conv_service = MagicMock()
-    conv_service.get_conversation = AsyncMock(
+    conv_service.get_history = AsyncMock(
         side_effect=ForbiddenError("Not your conversation")
     )
 
