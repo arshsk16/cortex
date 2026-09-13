@@ -15,6 +15,7 @@ from cortex.schemas.document import (
 )
 from cortex.schemas.health import ComponentHealth, HealthResponse
 from cortex.schemas.ingestion import DocumentProcessResponse
+from cortex.schemas.rag import CitationResponse, RAGQueryRequest, RAGResponse
 from cortex.schemas.retrieval import (
     RetrievalChunkResult,
     RetrievalRequest,
@@ -24,6 +25,7 @@ from cortex.schemas.user import UserCreate, UserRead, UserUpdate
 
 __all__ = [
     "AuthResponse",
+    "CitationResponse",
     "ComponentHealth",
     "DocumentChunkRead",
     "DocumentCreate",
@@ -32,6 +34,8 @@ __all__ = [
     "DocumentRead",
     "DocumentResponse",
     "HealthResponse",
+    "RAGQueryRequest",
+    "RAGResponse",
     "RetrievalChunkResult",
     "RetrievalRequest",
     "RetrievalResponse",

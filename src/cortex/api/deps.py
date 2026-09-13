@@ -15,6 +15,7 @@ from cortex.core.security import decode_access_token
 from cortex.db.models.user import User
 from cortex.db.session import Database, get_session
 from cortex.embeddings.base import EmbeddingProvider
+from cortex.llm.base import LLMProvider
 from cortex.retrieval.base import Retriever
 from cortex.retrieval.semantic import SemanticRetriever
 from cortex.services.auth import AuthService
@@ -24,6 +25,8 @@ from cortex.services.document import DocumentService
 from cortex.services.health import HealthService
 from cortex.services.ingestion import IngestionService
 from cortex.services.parser import ParserService
+from cortex.services.prompt_builder import PromptBuilder
+from cortex.services.rag import RAGService
 from cortex.services.storage import StorageService
 from cortex.services.user import UserService
 from cortex.vectorstore.base import VectorStore
@@ -44,6 +47,11 @@ def get_embedding_provider(request: Request) -> EmbeddingProvider:
 def get_vector_store(request: Request) -> VectorStore:
     """Resolve the application-scoped vector store from app state."""
     return request.app.state.vector_store  # type: ignore[no-any-return]
+
+
+def get_llm_provider(request: Request) -> LLMProvider:
+    """Resolve the application-scoped LLM provider from app state."""
+    return request.app.state.llm_provider  # type: ignore[no-any-return]
 
 
 async def get_db_session(
@@ -180,6 +188,24 @@ def get_retriever(
     )
 
 
+def get_prompt_builder() -> PromptBuilder:
+    """Construct a stateless PromptBuilder."""
+    return PromptBuilder()
+
+
+def get_rag_service(
+    retriever: Annotated[Retriever, Depends(get_retriever)],
+    llm_provider: Annotated[LLMProvider, Depends(get_llm_provider)],
+    prompt_builder: Annotated[PromptBuilder, Depends(get_prompt_builder)],
+) -> RAGService:
+    """Construct a request-scoped RAGService."""
+    return RAGService(
+        retriever=retriever,
+        llm_provider=llm_provider,
+        prompt_builder=prompt_builder,
+    )
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 DatabaseDep = Annotated[Database, Depends(get_database)]
 SessionDep = Annotated[AsyncSession, Depends(get_db_session)]
@@ -190,5 +216,7 @@ StorageServiceDep = Annotated[StorageService, Depends(get_storage_service)]
 DocumentServiceDep = Annotated[DocumentService, Depends(get_document_service)]
 IngestionServiceDep = Annotated[IngestionService, Depends(get_ingestion_service)]
 RetrieverDep = Annotated[Retriever, Depends(get_retriever)]
+LLMProviderDep = Annotated[LLMProvider, Depends(get_llm_provider)]
+RAGServiceDep = Annotated[RAGService, Depends(get_rag_service)]
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 CurrentActiveUserDep = Annotated[User, Depends(get_current_active_user)]

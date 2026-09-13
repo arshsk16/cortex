@@ -141,11 +141,33 @@ class Settings(BaseSettings):
         description="Chroma collection name for document chunk vectors",
     )
 
+    # LLM (Gemini)
+    gemini_api_key: str = Field(
+        default="",
+        description="Google AI Studio / Vertex API key for Gemini",
+    )
+    gemini_model_name: str = Field(
+        default="gemini-2.0-flash",
+        description="Gemini model identifier",
+    )
+    gemini_temperature: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature for Gemini generation (0 = deterministic)",
+    )
+    gemini_max_output_tokens: int = Field(
+        default=1024,
+        ge=1,
+        description="Maximum number of tokens in the Gemini response",
+    )
+
     @field_validator("database_url")
     @classmethod
     def validate_database_url(cls, value: str) -> str:
         """Ensure the URL uses an async PostgreSQL SQLAlchemy dialect."""
         normalized = value.strip()
+
         if not normalized.startswith("postgresql+asyncpg://"):
             msg = (
                 "DATABASE_URL must use the asyncpg dialect "

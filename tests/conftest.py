@@ -17,6 +17,7 @@ from cortex.db.models.document import Document, DocumentStatus
 from cortex.db.models.user import User, UserRole
 from cortex.db.session import Database
 from cortex.embeddings.base import EmbeddingProvider
+from cortex.llm.base import LLMProvider
 from cortex.main import create_app
 from cortex.vectorstore.base import VectorStore
 
@@ -44,6 +45,8 @@ def test_settings(tmp_path) -> Settings:
         document_allowed_mime_type="application/pdf",
         chroma_persist_directory=str(tmp_path / "chroma"),
         chroma_collection_name="test_document_chunks",
+        gemini_api_key="test-key",
+        gemini_model_name="gemini-2.0-flash",
     )
 
 
@@ -71,16 +74,27 @@ def mock_vector_store() -> VectorStore:
 
 
 @pytest.fixture
+def mock_llm_provider() -> LLMProvider:
+    """Fast mock LLM provider — returns a canned answer without network calls."""
+    provider = MagicMock(spec=LLMProvider)
+    provider.generate = AsyncMock(return_value="This is a mocked LLM answer.")
+    provider.generate_stream = AsyncMock(return_value=iter([]))
+    return provider
+
+
+@pytest.fixture
 def app(
     test_settings: Settings,
     mock_embedding_provider: EmbeddingProvider,
     mock_vector_store: VectorStore,
+    mock_llm_provider: LLMProvider,
 ) -> FastAPI:
     """Application instance with settings and DI state attached for tests."""
     application = create_app(settings=test_settings)
     application.state.database = Database(test_settings)
     application.state.embedding_provider = mock_embedding_provider
     application.state.vector_store = mock_vector_store
+    application.state.llm_provider = mock_llm_provider
     return application
 
 

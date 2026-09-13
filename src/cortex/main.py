@@ -16,6 +16,7 @@ from cortex.core.exceptions import register_exception_handlers
 from cortex.core.logging import configure_logging
 from cortex.db.session import Database
 from cortex.embeddings.factory import create_embedding_provider
+from cortex.llm.factory import create_llm_provider
 from cortex.vectorstore.factory import create_vector_store
 
 logger = logging.getLogger(__name__)
@@ -28,9 +29,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     database = Database(settings)
     embedding_provider = create_embedding_provider(settings)
     vector_store = create_vector_store(settings)
+    llm_provider = create_llm_provider(settings)
     app.state.database = database
     app.state.embedding_provider = embedding_provider
     app.state.vector_store = vector_store
+    app.state.llm_provider = llm_provider
     logger.info(
         "Cortex started (env=%s, version=%s, embedding_model=%s)",
         settings.app_env,
