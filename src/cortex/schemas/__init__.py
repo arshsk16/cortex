@@ -15,6 +15,11 @@ from cortex.schemas.document import (
 )
 from cortex.schemas.health import ComponentHealth, HealthResponse
 from cortex.schemas.ingestion import DocumentProcessResponse
+from cortex.schemas.retrieval import (
+    RetrievalChunkResult,
+    RetrievalRequest,
+    RetrievalResponse,
+)
 from cortex.schemas.user import UserCreate, UserRead, UserUpdate
 
 __all__ = [
@@ -27,6 +32,9 @@ __all__ = [
     "DocumentRead",
     "DocumentResponse",
     "HealthResponse",
+    "RetrievalChunkResult",
+    "RetrievalRequest",
+    "RetrievalResponse",
     "TokenResponse",
     "UserCreate",
     "UserLoginRequest",

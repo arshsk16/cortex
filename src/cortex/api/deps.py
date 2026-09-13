@@ -15,6 +15,8 @@ from cortex.core.security import decode_access_token
 from cortex.db.models.user import User
 from cortex.db.session import Database, get_session
 from cortex.embeddings.base import EmbeddingProvider
+from cortex.retrieval.base import Retriever
+from cortex.retrieval.semantic import SemanticRetriever
 from cortex.services.auth import AuthService
 from cortex.services.chunking import ChunkingService
 from cortex.services.cleaning import CleaningService
@@ -165,6 +167,19 @@ async def get_current_active_user(
     return current_user
 
 
+def get_retriever(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    embedding_provider: Annotated[EmbeddingProvider, Depends(get_embedding_provider)],
+    vector_store: Annotated[VectorStore, Depends(get_vector_store)],
+) -> Retriever:
+    """Construct a request-scoped SemanticRetriever."""
+    return SemanticRetriever(
+        session=session,
+        embedding_provider=embedding_provider,
+        vector_store=vector_store,
+    )
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 DatabaseDep = Annotated[Database, Depends(get_database)]
 SessionDep = Annotated[AsyncSession, Depends(get_db_session)]
@@ -174,5 +189,6 @@ AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 StorageServiceDep = Annotated[StorageService, Depends(get_storage_service)]
 DocumentServiceDep = Annotated[DocumentService, Depends(get_document_service)]
 IngestionServiceDep = Annotated[IngestionService, Depends(get_ingestion_service)]
+RetrieverDep = Annotated[Retriever, Depends(get_retriever)]
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 CurrentActiveUserDep = Annotated[User, Depends(get_current_active_user)]
