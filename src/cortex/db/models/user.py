@@ -13,6 +13,7 @@ from cortex.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 if TYPE_CHECKING:
     from cortex.db.models.conversation import Conversation
     from cortex.db.models.document import Document
+    from cortex.db.models.memory import Memory
 
 
 class UserRole(StrEnum):
@@ -72,6 +73,10 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
     )
     conversations: Mapped[list[Conversation]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    memories: Mapped[list[Memory]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
     )

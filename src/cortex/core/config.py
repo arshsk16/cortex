@@ -140,6 +140,10 @@ class Settings(BaseSettings):
         default="document_chunks",
         description="Chroma collection name for document chunk vectors",
     )
+    chroma_memory_collection_name: str = Field(
+        default="memories",
+        description="Chroma collection name for memory embedding vectors",
+    )
 
     # LLM (Gemini)
     gemini_api_key: str = Field(
@@ -251,3 +255,4 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return a cached Settings instance (safe for FastAPI dependency injection)."""
     return Settings()
+

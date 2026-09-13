@@ -19,6 +19,7 @@ from cortex.embeddings.factory import create_embedding_provider
 from cortex.llm.factory import create_llm_provider
 from cortex.state_store.null import NullStateStore
 from cortex.vectorstore.factory import create_vector_store
+from cortex.vectorstore.memory_store import MemoryVectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.embedding_provider = embedding_provider
     app.state.vector_store = vector_store
     app.state.llm_provider = llm_provider
+
+    # Memory vector store -- dedicated Chroma collection for memory embeddings
+    import chromadb as _chromadb
+    _chroma_client = _chromadb.PersistentClient(path=settings.chroma_persist_directory)
+    _memory_collection = _chroma_client.get_or_create_collection(
+        name=settings.chroma_memory_collection_name,
+        metadata={"hnsw:space": "cosine"},
+    )
+    app.state.memory_vector_store = MemoryVectorStore(_memory_collection)
 
     # Redis state store — optional; gracefully falls back to NullStateStore
     redis_client = None
@@ -152,3 +162,5 @@ app = create_app()
 
 if __name__ == "__main__":
     run()
+
+

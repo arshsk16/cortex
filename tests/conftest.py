@@ -20,6 +20,7 @@ from cortex.embeddings.base import EmbeddingProvider
 from cortex.llm.base import LLMProvider
 from cortex.main import create_app
 from cortex.vectorstore.base import VectorStore
+from cortex.vectorstore.memory_store import MemoryVectorStore
 
 MINIMAL_PDF_BYTES = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF"
 EMBEDDING_DIMENSION = 384
@@ -82,12 +83,26 @@ def mock_llm_provider() -> LLMProvider:
     return provider
 
 
+
+
+@pytest.fixture
+def mock_memory_vector_store() -> MemoryVectorStore:
+    """Mock MemoryVectorStore for API and service tests."""
+    store = MagicMock(spec=MemoryVectorStore)
+    store.upsert = AsyncMock()
+    store.delete = AsyncMock()
+    store.search = AsyncMock(return_value=[])
+    store.delete_all_for_user = AsyncMock()
+    return store
+
+
 @pytest.fixture
 def app(
     test_settings: Settings,
     mock_embedding_provider: EmbeddingProvider,
     mock_vector_store: VectorStore,
     mock_llm_provider: LLMProvider,
+    mock_memory_vector_store: MemoryVectorStore,
 ) -> FastAPI:
     """Application instance with settings and DI state attached for tests."""
     application = create_app(settings=test_settings)
@@ -95,6 +110,7 @@ def app(
     application.state.embedding_provider = mock_embedding_provider
     application.state.vector_store = mock_vector_store
     application.state.llm_provider = mock_llm_provider
+    application.state.memory_vector_store = mock_memory_vector_store
     return application
 
 
@@ -165,3 +181,8 @@ def sample_document(sample_user: User) -> Document:
 def minimal_pdf_bytes() -> bytes:
     """Minimal bytes that satisfy PDF magic-byte validation."""
     return MINIMAL_PDF_BYTES
+
+
+
+
+

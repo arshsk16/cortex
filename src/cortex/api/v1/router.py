@@ -1,4 +1,4 @@
-"""API v1 router — aggregates all v1 endpoint routers."""
+"""API v1 router -- aggregates all v1 endpoint routers."""
 
 from fastapi import APIRouter
 
@@ -9,6 +9,7 @@ from cortex.api.v1.endpoints import (
     conversations,
     documents,
     health,
+    memories,
     rag,
     retrieval,
 )
@@ -22,3 +23,4 @@ api_router.include_router(rag.router)
 api_router.include_router(conversations.router)
 api_router.include_router(agent.router)
 api_router.include_router(agent_stream.router)
+api_router.include_router(memories.router)

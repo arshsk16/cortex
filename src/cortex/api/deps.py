@@ -30,6 +30,7 @@ from cortex.services.conversation import ConversationService
 from cortex.services.document import DocumentService
 from cortex.services.health import HealthService
 from cortex.services.ingestion import IngestionService
+from cortex.services.memory import MemoryService
 from cortex.services.parser import ParserService
 from cortex.services.prompt_builder import PromptBuilder
 from cortex.services.rag import RAGService
@@ -37,6 +38,7 @@ from cortex.services.storage import StorageService
 from cortex.services.user import UserService
 from cortex.state_store.base import StateStore
 from cortex.vectorstore.base import VectorStore
+from cortex.vectorstore.memory_store import MemoryVectorStore
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -268,6 +270,25 @@ def get_agent_service(
     )
 
 
+
+
+def get_memory_vector_store(request: Request) -> MemoryVectorStore:
+    """Resolve the application-scoped MemoryVectorStore from app state."""
+    return request.app.state.memory_vector_store  # type: ignore[no-any-return]
+
+
+def get_memory_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    embedding_provider: Annotated[EmbeddingProvider, Depends(get_embedding_provider)],
+    memory_vector_store: Annotated[MemoryVectorStore, Depends(get_memory_vector_store)],
+) -> MemoryService:
+    """Construct a request-scoped MemoryService."""
+    return MemoryService(
+        session=session,
+        embedding_provider=embedding_provider,
+        memory_vector_store=memory_vector_store,
+    )
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 DatabaseDep = Annotated[Database, Depends(get_database)]
 SessionDep = Annotated[AsyncSession, Depends(get_db_session)]
@@ -288,5 +309,13 @@ ConversationRAGServiceDep = Annotated[
 ]
 AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 StateStoreDep = Annotated[StateStore, Depends(get_state_store)]
+MemoryServiceDep = Annotated[MemoryService, Depends(get_memory_service)]
+MemoryVectorStoreDep = Annotated[MemoryVectorStore, Depends(get_memory_vector_store)]
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 CurrentActiveUserDep = Annotated[User, Depends(get_current_active_user)]
+
+
+
+
+
+
