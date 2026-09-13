@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from cortex.retrieval.models import RetrievalResult
+
+if TYPE_CHECKING:
+    from cortex.db.models.conversation import Message
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# System instructions — defined as a module-level constant so they are
-# never assembled inline inside business logic and can be reviewed / edited
-# independently.
+# Section headers and system instructions — module-level constants so they
+# are never assembled inline inside business logic and can be reviewed,
+# versioned, and tested independently.
 # ---------------------------------------------------------------------------
 
 _SYSTEM_INSTRUCTIONS = """\
@@ -30,6 +34,8 @@ the context.
 6. Do NOT reference chunk numbers, scores, or internal metadata in your answer.\
 """
 
+_HISTORY_HEADER = "=== CONVERSATION HISTORY ==="
+_HISTORY_FOOTER = "=== END OF HISTORY ==="
 _CONTEXT_HEADER = "=== DOCUMENT CONTEXT ==="
 _CONTEXT_FOOTER = "=== END OF CONTEXT ==="
 _QUESTION_HEADER = "=== QUESTION ==="
@@ -38,14 +44,18 @@ _QUESTION_HEADER = "=== QUESTION ==="
 class PromptBuilder:
     """Assemble structured RAG prompts from retrieved context and user questions.
 
-    Separates three concerns into clearly delimited sections:
+    The prompt has four clearly delimited sections (in order):
 
-    1. **System instructions** — behavioural constraints for the model.
-    2. **Retrieved context** — verbatim chunk text from PostgreSQL.
-    3. **User question** — the original, unmodified question.
+    1. **System instructions** — behavioural constraints.
+    2. **Conversation history** — previous user/assistant turns (optional).
+    3. **Retrieved context** — verbatim chunk text.
+    4. **Current user question** — the unmodified question for this turn.
 
     This class contains *no* LLM-specific code; it is a pure string-assembly
     service that can be unit-tested without mocking any external dependency.
+
+    Backward compatibility: ``history`` defaults to an empty list so all
+    existing callers (including Phase 6 RAG tests) require no changes.
     """
 
     def build(
@@ -53,41 +63,69 @@ class PromptBuilder:
         *,
         question: str,
         retrieved_chunks: list[RetrievalResult],
+        history: list[Message] | None = None,
     ) -> str:
         """Build the full prompt string ready to pass to an :class:`LLMProvider`.
 
         Parameters
         ----------
         question:
-            The user's natural-language question.
+            The user's natural-language question for the current turn.
         retrieved_chunks:
             Ordered list of chunks from :class:`~cortex.retrieval.base.Retriever`.
-            May be empty; the prompt will include an explicit "no context" note
-            so the model knows to say it cannot answer.
+            May be empty; the prompt will include an explicit "no context" note.
+        history:
+            Previous conversation messages in chronological order.  When
+            provided, they are inserted between system instructions and
+            the retrieved context.  Defaults to ``None`` (no history section).
 
         Returns
         -------
         str
             A multi-section prompt string.
         """
-        context_block = self._build_context_block(retrieved_chunks)
+        sections: list[str] = [_SYSTEM_INSTRUCTIONS]
 
-        prompt = (
-            f"{_SYSTEM_INSTRUCTIONS}\n\n"
-            f"{_CONTEXT_HEADER}\n"
-            f"{context_block}\n"
-            f"{_CONTEXT_FOOTER}\n\n"
-            f"{_QUESTION_HEADER}\n"
-            f"{question.strip()}"
+        # History section (only rendered when history is non-empty)
+        if history:
+            history_block = self._build_history_block(history)
+            sections.append(
+                f"{_HISTORY_HEADER}\n{history_block}\n{_HISTORY_FOOTER}"
+            )
+
+        # Retrieved context section
+        context_block = self._build_context_block(retrieved_chunks)
+        sections.append(
+            f"{_CONTEXT_HEADER}\n{context_block}\n{_CONTEXT_FOOTER}"
         )
 
+        # Current question
+        sections.append(f"{_QUESTION_HEADER}\n{question.strip()}")
+
+        prompt = "\n\n".join(sections)
+
         logger.debug(
-            "Built RAG prompt (chunks=%d, question_len=%d, prompt_len=%d)",
+            "Built RAG prompt ("
+            "chunks=%d, history=%d, question_len=%d, prompt_len=%d)",
             len(retrieved_chunks),
+            len(history) if history else 0,
             len(question),
             len(prompt),
         )
         return prompt
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_history_block(messages: list[Message]) -> str:
+        """Format conversation history as labelled turns."""
+        parts: list[str] = []
+        for msg in messages:
+            label = "User" if msg.role == "user" else "Assistant"
+            parts.append(f"[{label}]\n{msg.content.strip()}")
+        return "\n\n".join(parts)
 
     @staticmethod
     def _build_context_block(chunks: list[RetrievalResult]) -> str:

@@ -7,6 +7,17 @@ from cortex.schemas.auth import (
     UserRegisterRequest,
 )
 from cortex.schemas.chunk import DocumentChunkRead
+from cortex.schemas.conversation import (
+    ChatRequest,
+    ChatResponse,
+    CitationRead,
+    ConversationCreate,
+    ConversationDetail,
+    ConversationList,
+    ConversationRead,
+    ConversationRename,
+    MessageRead,
+)
 from cortex.schemas.document import (
     DocumentCreate,
     DocumentList,
@@ -25,8 +36,16 @@ from cortex.schemas.user import UserCreate, UserRead, UserUpdate
 
 __all__ = [
     "AuthResponse",
+    "ChatRequest",
+    "ChatResponse",
+    "CitationRead",
     "CitationResponse",
     "ComponentHealth",
+    "ConversationCreate",
+    "ConversationDetail",
+    "ConversationList",
+    "ConversationRead",
+    "ConversationRename",
     "DocumentChunkRead",
     "DocumentCreate",
     "DocumentList",
@@ -34,6 +53,7 @@ __all__ = [
     "DocumentRead",
     "DocumentResponse",
     "HealthResponse",
+    "MessageRead",
     "RAGQueryRequest",
     "RAGResponse",
     "RetrievalChunkResult",

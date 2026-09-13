@@ -3,6 +3,7 @@
 from cortex.services.auth import AuthService
 from cortex.services.chunking import ChunkingService, TextChunk
 from cortex.services.cleaning import CleaningService
+from cortex.services.conversation import ConversationService
 from cortex.services.document import DocumentService
 from cortex.services.health import HealthService
 from cortex.services.ingestion import IngestionService
@@ -16,6 +17,7 @@ __all__ = [
     "AuthService",
     "ChunkingService",
     "CleaningService",
+    "ConversationService",
     "DocumentService",
     "HealthService",
     "IngestionService",

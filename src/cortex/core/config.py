@@ -162,6 +162,17 @@ class Settings(BaseSettings):
         description="Maximum number of tokens in the Gemini response",
     )
 
+    # Conversation
+    conversation_history_limit: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description=(
+            "Maximum number of previous messages to include in the prompt "
+            "for multi-turn conversation context"
+        ),
+    )
+
     @field_validator("database_url")
     @classmethod
     def validate_database_url(cls, value: str) -> str:

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from cortex.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
+    from cortex.db.models.conversation import Conversation
     from cortex.db.models.document import Document
 
 
@@ -67,6 +68,10 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     documents: Mapped[list[Document]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    conversations: Mapped[list[Conversation]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
     )

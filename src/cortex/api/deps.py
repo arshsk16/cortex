@@ -21,6 +21,7 @@ from cortex.retrieval.semantic import SemanticRetriever
 from cortex.services.auth import AuthService
 from cortex.services.chunking import ChunkingService
 from cortex.services.cleaning import CleaningService
+from cortex.services.conversation import ConversationService
 from cortex.services.document import DocumentService
 from cortex.services.health import HealthService
 from cortex.services.ingestion import IngestionService
@@ -198,11 +199,35 @@ def get_rag_service(
     llm_provider: Annotated[LLMProvider, Depends(get_llm_provider)],
     prompt_builder: Annotated[PromptBuilder, Depends(get_prompt_builder)],
 ) -> RAGService:
-    """Construct a request-scoped RAGService."""
+    """Stateless RAGService — used by the Phase 6 /rag/query endpoint."""
     return RAGService(
         retriever=retriever,
         llm_provider=llm_provider,
         prompt_builder=prompt_builder,
+    )
+
+
+def get_conversation_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ConversationService:
+    """Construct a request-scoped ConversationService."""
+    return ConversationService(session=session)
+
+
+def get_conversation_rag_service(
+    retriever: Annotated[Retriever, Depends(get_retriever)],
+    llm_provider: Annotated[LLMProvider, Depends(get_llm_provider)],
+    prompt_builder: Annotated[PromptBuilder, Depends(get_prompt_builder)],
+    conv_service: Annotated[ConversationService, Depends(get_conversation_service)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> RAGService:
+    """Conversation-aware RAGService — used by the chat endpoint."""
+    return RAGService(
+        retriever=retriever,
+        llm_provider=llm_provider,
+        prompt_builder=prompt_builder,
+        conversation_service=conv_service,
+        conversation_history_limit=settings.conversation_history_limit,
     )
 
 
@@ -218,5 +243,11 @@ IngestionServiceDep = Annotated[IngestionService, Depends(get_ingestion_service)
 RetrieverDep = Annotated[Retriever, Depends(get_retriever)]
 LLMProviderDep = Annotated[LLMProvider, Depends(get_llm_provider)]
 RAGServiceDep = Annotated[RAGService, Depends(get_rag_service)]
+ConversationServiceDep = Annotated[
+    ConversationService, Depends(get_conversation_service)
+]
+ConversationRAGServiceDep = Annotated[
+    RAGService, Depends(get_conversation_rag_service)
+]
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 CurrentActiveUserDep = Annotated[User, Depends(get_current_active_user)]
