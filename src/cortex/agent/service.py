@@ -51,14 +51,14 @@ When ``conversation_id`` is supplied, :meth:`get_history` enforces ownership
 (raises ``ForbiddenError`` / ``NotFoundError``).  History is loaded **before**
 any tool call, so an ownership violation aborts the entire run.
 """
-
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cortex.agent.events import AgentEvent
 from cortex.agent.prompt import AgentPromptBuilder
@@ -74,11 +74,13 @@ if TYPE_CHECKING:
     from cortex.db.models.user import User
     from cortex.llm.base import LLMProvider
     from cortex.services.conversation import ConversationService
+    from cortex.state_store.base import StateStore
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_TOOL_CALLS = 5
 _DEFAULT_HISTORY_LIMIT = 10
+_DEFAULT_STATE_TTL = 1800  # 30 minutes
 
 
 class AgentService:
@@ -105,6 +107,13 @@ class AgentService:
         Maximum number of previous messages loaded from the database to
         include as conversation memory in the grounded-answer prompt.
         Bounded to prevent unbounded context growth.  Defaults to 10.
+    state_store:
+        Optional ephemeral state store (Redis or Null).  When supplied,
+        agent execution snapshots are saved at run start, after each tool
+        call, and deleted on successful completion (or marked ``failed``
+        on error).  Defaults to ``NullStateStore`` behaviour (no-op).
+    state_ttl_seconds:
+        TTL for Redis state snapshots.  Defaults to 1800 (30 minutes).
     """
 
     def __init__(
@@ -114,15 +123,19 @@ class AgentService:
         tool_registry: ToolRegistry,
         prompt_builder: PromptBuilder,
         conversation_service: ConversationService | None = None,
+        state_store: StateStore | None = None,
         max_tool_calls: int = _DEFAULT_MAX_TOOL_CALLS,
         conversation_history_limit: int = _DEFAULT_HISTORY_LIMIT,
+        state_ttl_seconds: int = _DEFAULT_STATE_TTL,
     ) -> None:
         self._llm = llm_provider
         self._registry = tool_registry
         self._prompt_builder = prompt_builder
         self._conv_service = conversation_service
+        self._state_store = state_store
         self._max_tool_calls = max_tool_calls
         self._history_limit = conversation_history_limit
+        self._state_ttl = state_ttl_seconds
         self._agent_prompt_builder = AgentPromptBuilder()
 
     # ------------------------------------------------------------------
@@ -175,92 +188,99 @@ class AgentService:
             conversation_id=conversation_id,
         )
 
-        # ------------------------------------------------------------------
-        # Phase 2: Tool-calling loop — dispatched by provider capability
-        # ------------------------------------------------------------------
-        from cortex.llm.base import SupportsToolCalling  # local → avoids cycle
-
-        if isinstance(self._llm, SupportsToolCalling):
-            logger.debug(
-                "Agent using native tool-calling path (provider=%s)",
-                type(self._llm).__name__,
-            )
-            await self._native_tool_loop(state=state)
-        else:
-            logger.debug(
-                "Agent using prompt-based tool-calling path (provider=%s)",
-                type(self._llm).__name__,
-            )
-            await self._prompt_tool_loop(state=state)
-
-        # ------------------------------------------------------------------
-        # Phase 3: Generate grounded final answer
-        #   Pass conversation history so the LLM can maintain context/tone.
-        #   Retrieved chunks remain the authoritative evidence section.
-        #
-        #   Memory boundary:
-        #     state.history  → PromptBuilder history section (context/memory)
-        #     state.retrieved_chunks → PromptBuilder context section (evidence)
-        # ------------------------------------------------------------------
-        grounded_prompt = self._prompt_builder.build(
-            question=question,
-            retrieved_chunks=state.retrieved_chunks,
-            history=state.history if state.has_history else None,
-        )
-
         try:
-            final_answer = await self._llm.generate(grounded_prompt)
-        except ServiceUnavailableError:
-            raise
+            # ------------------------------------------------------------------
+            # Phase 2: Tool-calling loop — dispatched by provider capability
+            # ------------------------------------------------------------------
+            from cortex.llm.base import SupportsToolCalling  # local → avoids cycle
+
+            if isinstance(self._llm, SupportsToolCalling):
+                logger.debug(
+                    "Agent using native tool-calling path (provider=%s)",
+                    type(self._llm).__name__,
+                )
+                await self._native_tool_loop(state=state)
+            else:
+                logger.debug(
+                    "Agent using prompt-based tool-calling path (provider=%s)",
+                    type(self._llm).__name__,
+                )
+                await self._prompt_tool_loop(state=state)
+
+            # ------------------------------------------------------------------
+            # Phase 3: Generate grounded final answer
+            #   Pass conversation history so the LLM can maintain context/tone.
+            #   Retrieved chunks remain the authoritative evidence section.
+            #
+            #   Memory boundary:
+            #     state.history  → PromptBuilder history section (context/memory)
+            #     state.retrieved_chunks → PromptBuilder context section (evidence)
+            # ------------------------------------------------------------------
+            grounded_prompt = self._prompt_builder.build(
+                question=question,
+                retrieved_chunks=state.retrieved_chunks,
+                history=state.history if state.has_history else None,
+            )
+
+            try:
+                final_answer = await self._llm.generate(grounded_prompt)
+            except ServiceUnavailableError:
+                raise
+            except Exception as exc:
+                raise ServiceUnavailableError(
+                    "LLM final-answer generation failed",
+                    details={"reason": str(exc)},
+                ) from exc
+
+            logger.info(
+                "Agent run complete: user_id=%s conversation_id=%s "
+                "tool_calls=%d chunks=%d history=%d elapsed_ms=%.1f",
+                user.id,
+                conversation_id,
+                state.total_tool_calls,
+                len(state.retrieved_chunks),
+                len(state.history),
+                state.elapsed_ms,
+            )
+
+            # ------------------------------------------------------------------
+            # Phase 4: Persist assistant message + token usage
+            # ------------------------------------------------------------------
+            if conversation_id and self._conv_service:
+                citation_dicts = [
+                    {
+                        "document_id": c.document_id,
+                        "chunk_id": c.chunk_id,
+                        "chunk_index": c.chunk_index,
+                    }
+                    for c in state.retrieved_chunks
+                ]
+                await self._conv_service.add_message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=final_answer,
+                    citations=citation_dicts or None,
+                )
+                prompt_tokens = len(grounded_prompt) // 4
+                completion_tokens = len(final_answer) // 4
+                await self._conv_service.record_token_usage(
+                    conversation_id=conversation_id,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=prompt_tokens + completion_tokens,
+                )
+
+            # Clean up ephemeral state on success
+            await self._delete_state(state)
+
+            return AgentResult(
+                answer=final_answer,
+                tool_calls=state.tool_calls,
+                retrieved_chunks=state.retrieved_chunks,
+            )
         except Exception as exc:
-            raise ServiceUnavailableError(
-                "LLM final-answer generation failed",
-                details={"reason": str(exc)},
-            ) from exc
-
-        logger.info(
-            "Agent run complete: user_id=%s conversation_id=%s "
-            "tool_calls=%d chunks=%d history=%d elapsed_ms=%.1f",
-            user.id,
-            conversation_id,
-            state.total_tool_calls,
-            len(state.retrieved_chunks),
-            len(state.history),
-            state.elapsed_ms,
-        )
-
-        # ------------------------------------------------------------------
-        # Phase 4: Persist assistant message + token usage
-        # ------------------------------------------------------------------
-        if conversation_id and self._conv_service:
-            citation_dicts = [
-                {
-                    "document_id": c.document_id,
-                    "chunk_id": c.chunk_id,
-                    "chunk_index": c.chunk_index,
-                }
-                for c in state.retrieved_chunks
-            ]
-            await self._conv_service.add_message(
-                conversation_id=conversation_id,
-                role="assistant",
-                content=final_answer,
-                citations=citation_dicts or None,
-            )
-            prompt_tokens = len(grounded_prompt) // 4
-            completion_tokens = len(final_answer) // 4
-            await self._conv_service.record_token_usage(
-                conversation_id=conversation_id,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-            )
-
-        return AgentResult(
-            answer=final_answer,
-            tool_calls=state.tool_calls,
-            retrieved_chunks=state.retrieved_chunks,
-        )
+            await self._save_state(state, status="failed", error=str(exc))
+            raise
 
     async def stream(
         self,
@@ -316,61 +336,100 @@ class AgentService:
             yield ErrorEvent(message=str(exc))
             return
 
-        # ------------------------------------------------------------------
-        # Phase 2: Tool-calling loop with event emission
-        # ------------------------------------------------------------------
         try:
+            # ------------------------------------------------------------------
+            # Phase 2: Tool-calling loop with event emission
+            # ------------------------------------------------------------------
             if isinstance(self._llm, SupportsToolCalling):
                 async for event in self._native_tool_loop_stream(state=state):
                     yield event
             else:
                 async for event in self._prompt_tool_loop_stream(state=state):
                     yield event
-        except Exception as exc:
-            yield ErrorEvent(message=f"Tool loop failed: {exc}")
-            return
 
-        # ------------------------------------------------------------------
-        # Phase 3: Stream final grounded answer token-by-token
-        # ------------------------------------------------------------------
-        grounded_prompt = self._prompt_builder.build(
-            question=question,
-            retrieved_chunks=state.retrieved_chunks,
-            history=state.history if state.has_history else None,
-        )
+            # ------------------------------------------------------------------
+            # Phase 3: Stream final grounded answer token-by-token
+            # ------------------------------------------------------------------
+            grounded_prompt = self._prompt_builder.build(
+                question=question,
+                retrieved_chunks=state.retrieved_chunks,
+                history=state.history if state.has_history else None,
+            )
 
-        final_parts: list[str] = []
-        try:
-            token_stream = await self._llm.generate_stream(grounded_prompt)
-            async for token in token_stream:
-                if token:
-                    final_parts.append(token)
-                    yield TokenEvent(text=token)
-        except ServiceUnavailableError as exc:
-            yield ErrorEvent(message=f"LLM streaming failed: {exc}")
-            return
-        except Exception as exc:
-            yield ErrorEvent(message=f"LLM streaming failed: {exc}")
-            return
+            final_parts: list[str] = []
+            try:
+                token_stream = await self._llm.generate_stream(grounded_prompt)
+                async for token in token_stream:
+                    if token:
+                        final_parts.append(token)
+                        yield TokenEvent(text=token)
+            except ServiceUnavailableError as exc:
+                await self._save_state(state, status="failed", error=str(exc))
+                yield ErrorEvent(message=f"LLM streaming failed: {exc}")
+                return
+            except asyncio.CancelledError:
+                await self._save_state(
+                    state, status="cancelled", error="Client disconnected"
+                )
+                raise
+            except Exception as exc:
+                await self._save_state(state, status="failed", error=str(exc))
+                yield ErrorEvent(message=f"LLM streaming failed: {exc}")
+                return
 
-        final_answer = "".join(final_parts)
+            final_answer = "".join(final_parts)
 
-        logger.info(
-            "Agent stream complete: user_id=%s conversation_id=%s "
-            "tool_calls=%d chunks=%d history=%d elapsed_ms=%.1f",
-            user.id,
-            conversation_id,
-            state.total_tool_calls,
-            len(state.retrieved_chunks),
-            len(state.history),
-            state.elapsed_ms,
-        )
+            logger.info(
+                "Agent stream complete: user_id=%s conversation_id=%s "
+                "tool_calls=%d chunks=%d history=%d elapsed_ms=%.1f",
+                user.id,
+                conversation_id,
+                state.total_tool_calls,
+                len(state.retrieved_chunks),
+                len(state.history),
+                state.elapsed_ms,
+            )
 
-        # ------------------------------------------------------------------
-        # Phase 4: Persist assistant message + token usage
-        # ------------------------------------------------------------------
-        if conversation_id and self._conv_service:
-            citation_dicts = [
+            # ------------------------------------------------------------------
+            # Phase 4: Persist assistant message + token usage
+            # ------------------------------------------------------------------
+            if conversation_id and self._conv_service:
+                citation_dicts = [
+                    {
+                        "document_id": c.document_id,
+                        "chunk_id": c.chunk_id,
+                        "chunk_index": c.chunk_index,
+                    }
+                    for c in state.retrieved_chunks
+                ]
+                await self._conv_service.add_message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=final_answer,
+                    citations=citation_dicts or None,
+                )
+                prompt_tokens = len(grounded_prompt) // 4
+                completion_tokens = len(final_answer) // 4
+                await self._conv_service.record_token_usage(
+                    conversation_id=conversation_id,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=prompt_tokens + completion_tokens,
+                )
+
+            # Clean up ephemeral state on success
+            await self._delete_state(state)
+
+            # Build done event (mirrors AgentResponse field names)
+            tool_calls_made = [
+                {
+                    "tool_name": tc.tool_name,
+                    "args": tc.args,
+                    "observation": tc.observation,
+                }
+                for tc in state.tool_calls
+            ]
+            citations = [
                 {
                     "document_id": c.document_id,
                     "chunk_id": c.chunk_id,
@@ -378,40 +437,21 @@ class AgentService:
                 }
                 for c in state.retrieved_chunks
             ]
-            await self._conv_service.add_message(
+            yield DoneEvent(
+                answer=final_answer,
+                tool_calls_made=tool_calls_made,
+                citations=citations,
                 conversation_id=conversation_id,
-                role="assistant",
-                content=final_answer,
-                citations=citation_dicts or None,
             )
-            prompt_tokens = len(grounded_prompt) // 4
-            completion_tokens = len(final_answer) // 4
-            await self._conv_service.record_token_usage(
-                conversation_id=conversation_id,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
+        except asyncio.CancelledError:
+            await self._save_state(
+                state, status="cancelled", error="Client disconnected"
             )
-
-        # Build done event (mirrors AgentResponse field names)
-        tool_calls_made = [
-            {"tool_name": tc.tool_name, "args": tc.args, "observation": tc.observation}
-            for tc in state.tool_calls
-        ]
-        citations = [
-            {
-                "document_id": c.document_id,
-                "chunk_id": c.chunk_id,
-                "chunk_index": c.chunk_index,
-            }
-            for c in state.retrieved_chunks
-        ]
-        yield DoneEvent(
-            answer=final_answer,
-            tool_calls_made=tool_calls_made,
-            citations=citations,
-            conversation_id=conversation_id,
-        )
+            raise
+        except Exception as exc:
+            await self._save_state(state, status="failed", error=str(exc))
+            yield ErrorEvent(message=f"Tool loop failed: {exc}")
+            return
 
     # ------------------------------------------------------------------
     # Private — State construction
@@ -455,12 +495,14 @@ class AgentService:
                 first_message=question,
             )
 
-        return AgentState(
+        state = AgentState(
             question=question,
             user=user,
             conversation_id=conversation_id,
             history=history,
         )
+        await self._save_state(state, status="in_progress")
+        return state
 
     # ------------------------------------------------------------------
     # Private — Native tool-calling loop (Phase 9)
@@ -544,6 +586,7 @@ class AgentService:
                     observation=observation,
                 )
             )
+            await self._save_state(state, status="in_progress")
 
             # Append tool result to history so the provider can see it
             messages.append(
@@ -639,6 +682,7 @@ class AgentService:
                         observation=observation,
                     )
                 )
+                await self._save_state(state, status="in_progress")
 
                 current_prompt = self._agent_prompt_builder.build_observation_turn(
                     previous_prompt=current_prompt,
@@ -738,6 +782,7 @@ class AgentService:
                     observation=observation,
                 )
             )
+            await self._save_state(state, status="in_progress")
 
             # Emit tool_result event (bounded preview)
             yield ToolResultEvent.from_observation(tool_name, observation)
@@ -834,6 +879,7 @@ class AgentService:
                         observation=observation,
                     )
                 )
+                await self._save_state(state, status="in_progress")
 
                 # Emit tool_result event
                 yield ToolResultEvent.from_observation(tool_name, observation)
@@ -886,3 +932,123 @@ class AgentService:
             )
             # Return a synthetic final-answer so the loop exits cleanly
             return {"action": "final_answer", "answer": raw.strip()}
+
+    # ------------------------------------------------------------------
+    # Ephemeral state-store helpers (Phase 12)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _state_key(
+        user_id: str,
+        conversation_id: str | None,
+        run_id: str,
+    ) -> str:
+        """Construct namespaced Redis key for an agent run.
+
+        Format: cortex:agent:run:{user_id}:{conversation_id}:{run_id}
+        Stateless runs use '_stateless' for conversation_id.
+        """
+        conv = conversation_id or "_stateless"
+        return f"cortex:agent:run:{user_id}:{conv}:{run_id}"
+
+    @staticmethod
+    def _snapshot(
+        state: AgentState,
+        *,
+        status: str = "in_progress",
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        """Serialise AgentState to an ephemeral, JSON-safe dictionary.
+
+        Excludes non-serialisable objects (User, raw Message rows) and large
+        raw text chunks (stores chunk IDs only).
+        """
+        return {
+            "run_id": state.run_id,
+            "user_id": str(state.user.id),
+            "conversation_id": state.conversation_id,
+            "question": state.question,
+            "started_at_iso": getattr(state, "started_at_iso", ""),
+            "tool_calls": [
+                {
+                    "tool_name": tc.tool_name,
+                    "args": tc.args,
+                    "observation": tc.observation,
+                }
+                for tc in state.tool_calls
+            ],
+            "retrieved_chunk_ids": [c.chunk_id for c in state.retrieved_chunks],
+            "status": status,
+            "error": error,
+        }
+
+    async def _save_state(
+        self,
+        state: AgentState,
+        *,
+        status: str = "in_progress",
+        error: str | None = None,
+    ) -> None:
+        """Persist state snapshot to StateStore if configured; never raises."""
+        if self._state_store is None:
+            return
+        try:
+            key = self._state_key(
+                user_id=str(state.user.id),
+                conversation_id=state.conversation_id,
+                run_id=state.run_id,
+            )
+            snapshot = self._snapshot(state, status=status, error=error)
+            await self._state_store.save(key, snapshot, ttl_seconds=self._state_ttl)
+        except Exception:
+            logger.warning(
+                "AgentService: failed to save state snapshot (run_id=%s)",
+                state.run_id,
+                exc_info=True,
+            )
+
+    async def _delete_state(self, state: AgentState) -> None:
+        """Delete ephemeral state on run completion; never raises."""
+        if self._state_store is None:
+            return
+        try:
+            key = self._state_key(
+                user_id=str(state.user.id),
+                conversation_id=state.conversation_id,
+                run_id=state.run_id,
+            )
+            await self._state_store.delete(key)
+        except Exception:
+            logger.warning(
+                "AgentService: failed to delete state snapshot (run_id=%s)",
+                state.run_id,
+                exc_info=True,
+            )
+
+    async def load_state(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str | None,
+        run_id: str,
+    ) -> dict[str, Any] | None:
+        """Load an ephemeral agent state snapshot from the state store, if available.
+
+        Returns None if no state store is configured or the key is not found / expired.
+        """
+        if self._state_store is None:
+            return None
+        try:
+            key = self._state_key(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                run_id=run_id,
+            )
+            return await self._state_store.load(key)
+        except Exception:
+            logger.warning(
+                "AgentService: failed to load state snapshot (run_id=%s)",
+                run_id,
+                exc_info=True,
+            )
+            return None

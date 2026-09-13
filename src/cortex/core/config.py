@@ -184,6 +184,24 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Redis / ephemeral state store
+    redis_url: str = Field(
+        default="",
+        description=(
+            "Redis connection URL (e.g. redis://localhost:6379/0). "
+            "Leave empty to disable Redis and use the NullStateStore."
+        ),
+    )
+    agent_state_ttl_seconds: int = Field(
+        default=1800,
+        ge=60,
+        le=86400,
+        description=(
+            "TTL in seconds for agent execution state snapshots stored in Redis. "
+            "Defaults to 1800 (30 minutes)."
+        ),
+    )
+
     @field_validator("database_url")
     @classmethod
     def validate_database_url(cls, value: str) -> str:

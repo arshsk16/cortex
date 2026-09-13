@@ -17,6 +17,7 @@ from cortex.core.logging import configure_logging
 from cortex.db.session import Database
 from cortex.embeddings.factory import create_embedding_provider
 from cortex.llm.factory import create_llm_provider
+from cortex.state_store.null import NullStateStore
 from cortex.vectorstore.factory import create_vector_store
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.embedding_provider = embedding_provider
     app.state.vector_store = vector_store
     app.state.llm_provider = llm_provider
+
+    # Redis state store — optional; gracefully falls back to NullStateStore
+    redis_client = None
+    if settings.redis_url:
+        try:
+            from redis.asyncio import Redis
+
+            from cortex.state_store.redis_store import RedisStateStore
+
+            redis_client = Redis.from_url(
+                settings.redis_url,
+                decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2,
+            )
+            app.state.state_store = RedisStateStore(redis_client)
+            logger.info("StateStore: Redis connected at %s", settings.redis_url)
+        except Exception:
+            logger.warning(
+                "StateStore: failed to connect to Redis — using NullStateStore",
+                exc_info=True,
+            )
+            app.state.state_store = NullStateStore()
+    else:
+        app.state.state_store = NullStateStore()
+
     logger.info(
         "Cortex started (env=%s, version=%s, embedding_model=%s)",
         settings.app_env,
@@ -44,6 +71,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await database.dispose()
+        if redis_client is not None:
+            try:
+                await redis_client.aclose()
+                logger.info("StateStore: Redis connection closed")
+            except Exception:
+                logger.warning(
+                    "StateStore: error closing Redis connection", exc_info=True
+                )
         logger.info("Cortex shut down cleanly")
 
 

@@ -20,7 +20,6 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from cortex.agent.registry import ToolRegistry
-from cortex.agent.result import AgentResult
 from cortex.agent.service import AgentService
 from cortex.agent.tools.calculator import CalculatorTool
 from cortex.agent.tools.rag_search import RAGSearchTool

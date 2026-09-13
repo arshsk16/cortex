@@ -114,7 +114,9 @@ async def test_agent_run_returns_200_with_answer(
         return_value=_make_agent_result(answer="Paris is the capital of France.")
     )
     async with api_client as client:
-        response = await client.post(AGENT_URL, json={"message": "What is the capital of France?"})
+        response = await client.post(
+            AGENT_URL, json={"message": "What is the capital of France?"}
+        )
 
     assert response.status_code == 200
     body = response.json()
@@ -126,9 +128,7 @@ async def test_agent_run_returns_empty_tool_calls_and_citations_when_none(
     api_client: AsyncClient,
     mock_agent_service: AgentService,
 ) -> None:
-    mock_agent_service.run = AsyncMock(
-        return_value=_make_agent_result()
-    )
+    mock_agent_service.run = AsyncMock(return_value=_make_agent_result())
     async with api_client as client:
         response = await client.post(AGENT_URL, json={"message": "Hello"})
 
@@ -194,7 +194,9 @@ async def test_agent_run_returns_citations_from_chunks(
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url=BASE_URL) as client:
-        response = await client.post(AGENT_URL, json={"message": "What does the doc say?"})
+        response = await client.post(
+            AGENT_URL, json={"message": "What does the doc say?"}
+        )
 
     assert response.status_code == 200
     body = response.json()
@@ -302,9 +304,7 @@ async def test_agent_run_bad_request_returns_400(
 ) -> None:
     """BadRequestError from AgentService → 400."""
     svc = MagicMock(spec=AgentService)
-    svc.run = AsyncMock(
-        side_effect=BadRequestError("Agent question must not be empty")
-    )
+    svc.run = AsyncMock(side_effect=BadRequestError("Agent question must not be empty"))
     app.dependency_overrides[get_current_active_user] = lambda: sample_user
     app.dependency_overrides[get_agent_service] = lambda: svc
 
@@ -328,9 +328,7 @@ async def test_agent_run_forbidden_conversation_returns_403(
 ) -> None:
     """ForbiddenError (wrong conversation owner) → 403."""
     svc = MagicMock(spec=AgentService)
-    svc.run = AsyncMock(
-        side_effect=ForbiddenError("You do not own this conversation")
-    )
+    svc.run = AsyncMock(side_effect=ForbiddenError("You do not own this conversation"))
     app.dependency_overrides[get_current_active_user] = lambda: sample_user
     app.dependency_overrides[get_agent_service] = lambda: svc
 
@@ -372,9 +370,7 @@ async def test_agent_run_llm_failure_returns_503(
 ) -> None:
     """ServiceUnavailableError from LLM → 503."""
     svc = MagicMock(spec=AgentService)
-    svc.run = AsyncMock(
-        side_effect=ServiceUnavailableError("LLM generation failed")
-    )
+    svc.run = AsyncMock(side_effect=ServiceUnavailableError("LLM generation failed"))
     app.dependency_overrides[get_current_active_user] = lambda: sample_user
     app.dependency_overrides[get_agent_service] = lambda: svc
 

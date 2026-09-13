@@ -35,6 +35,7 @@ from cortex.services.prompt_builder import PromptBuilder
 from cortex.services.rag import RAGService
 from cortex.services.storage import StorageService
 from cortex.services.user import UserService
+from cortex.state_store.base import StateStore
 from cortex.vectorstore.base import VectorStore
 
 _bearer_scheme = HTTPBearer(auto_error=False)
@@ -58,6 +59,11 @@ def get_vector_store(request: Request) -> VectorStore:
 def get_llm_provider(request: Request) -> LLMProvider:
     """Resolve the application-scoped LLM provider from app state."""
     return request.app.state.llm_provider  # type: ignore[no-any-return]
+
+
+def get_state_store(request: Request) -> StateStore:
+    """Resolve the application-scoped StateStore from app state."""
+    return request.app.state.state_store  # type: ignore[no-any-return]
 
 
 async def get_db_session(
@@ -242,6 +248,7 @@ def get_agent_service(
     prompt_builder: Annotated[PromptBuilder, Depends(get_prompt_builder)],
     document_service: Annotated[DocumentService, Depends(get_document_service)],
     conv_service: Annotated[ConversationService, Depends(get_conversation_service)],
+    state_store: Annotated[StateStore, Depends(get_state_store)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> AgentService:
     """Construct a request-scoped AgentService with all three tools registered."""
@@ -254,8 +261,10 @@ def get_agent_service(
         tool_registry=registry,
         prompt_builder=prompt_builder,
         conversation_service=conv_service,
+        state_store=state_store,
         max_tool_calls=settings.agent_max_tool_calls,
         conversation_history_limit=settings.conversation_history_limit,
+        state_ttl_seconds=settings.agent_state_ttl_seconds,
     )
 
 
@@ -278,5 +287,6 @@ ConversationRAGServiceDep = Annotated[
     RAGService, Depends(get_conversation_rag_service)
 ]
 AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
+StateStoreDep = Annotated[StateStore, Depends(get_state_store)]
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 CurrentActiveUserDep = Annotated[User, Depends(get_current_active_user)]

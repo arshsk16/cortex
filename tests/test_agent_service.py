@@ -7,7 +7,7 @@ is mocked so these tests run without any network or database access.
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -19,7 +19,6 @@ from cortex.agent.tools.rag_search import RAGSearchTool
 from cortex.core.exceptions import BadRequestError, ServiceUnavailableError
 from cortex.retrieval.models import RetrievalResult
 from cortex.services.prompt_builder import PromptBuilder
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -117,9 +116,7 @@ class TestAgentDirectAnswer:
         mock_llm_provider.generate = AsyncMock(
             side_effect=[
                 # Turn 0: immediate final answer
-                json.dumps(
-                    {"action": "final_answer", "answer": "The answer is 42."}
-                ),
+                json.dumps({"action": "final_answer", "answer": "The answer is 42."}),
                 # Grounded answer call
                 "The answer is 42.",
             ]
@@ -167,7 +164,9 @@ class TestAgentWithRAGTool:
         registry = _make_registry(mock_retriever)
         service = _make_service(mock_llm_provider, registry)
 
-        result = await service.run(question="What is the capital of France?", user=sample_user)
+        result = await service.run(
+            question="What is the capital of France?", user=sample_user
+        )
 
         assert len(result.tool_calls) == 1
         assert result.tool_calls[0].tool_name == "rag_search"
@@ -195,9 +194,7 @@ class TestAgentWithRAGTool:
                     }
                 )
             if len(captured_prompts) == 2:
-                return json.dumps(
-                    {"action": "final_answer", "answer": "Paris"}
-                )
+                return json.dumps({"action": "final_answer", "answer": "Paris"})
             return "Paris"
 
         mock_llm_provider.generate = capture_generate
@@ -229,16 +226,16 @@ class TestAgentWithCalculatorTool:
                         "args": {"expression": "2 ** 10"},
                     }
                 ),
-                json.dumps(
-                    {"action": "final_answer", "answer": "2^10 = 1024"}
-                ),
+                json.dumps({"action": "final_answer", "answer": "2^10 = 1024"}),
                 "2 raised to the power of 10 is 1024.",
             ]
         )
         registry = _make_registry(mock_retriever)
         service = _make_service(mock_llm_provider, registry)
 
-        result = await service.run(question="What is 2 to the power of 10?", user=sample_user)
+        result = await service.run(
+            question="What is 2 to the power of 10?", user=sample_user
+        )
 
         assert len(result.tool_calls) == 1
         assert result.tool_calls[0].tool_name == "calculator"
@@ -296,7 +293,9 @@ class TestAgentUnknownTool:
                         "args": {},
                     }
                 ),
-                json.dumps({"action": "final_answer", "answer": "Sorry, I used a wrong tool."}),
+                json.dumps(
+                    {"action": "final_answer", "answer": "Sorry, I used a wrong tool."}
+                ),
                 "I cannot determine the answer.",
             ]
         )
@@ -371,7 +370,9 @@ class TestAgentConversationSecurity:
             ]
         )
         registry = _make_registry(mock_retriever)
-        service = _make_service(mock_llm_provider, registry, conv_service=mock_conv_service)
+        service = _make_service(
+            mock_llm_provider, registry, conv_service=mock_conv_service
+        )
 
         await service.run(
             question="Hello",
@@ -447,7 +448,9 @@ class TestAgentConversationPersistence:
             ]
         )
         registry = _make_registry(mock_retriever)
-        service = _make_service(mock_llm_provider, registry, conv_service=mock_conv_service)
+        service = _make_service(
+            mock_llm_provider, registry, conv_service=mock_conv_service
+        )
 
         await service.run(
             question="Persist this please",
@@ -474,7 +477,9 @@ class TestAgentConversationPersistence:
             ]
         )
         registry = _make_registry(mock_retriever)
-        service = _make_service(mock_llm_provider, registry, conv_service=mock_conv_service)
+        service = _make_service(
+            mock_llm_provider, registry, conv_service=mock_conv_service
+        )
 
         # No conversation_id supplied
         await service.run(question="No history please", user=sample_user)

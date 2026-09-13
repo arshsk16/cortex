@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from cortex.agent.result import ToolCallRecord
 from cortex.retrieval.models import RetrievalResult
@@ -47,6 +49,11 @@ class AgentState:
         ownership enforcement; never serialised or logged in full.
     conversation_id:
         The conversation this run belongs to, or ``None`` for stateless runs.
+    run_id:
+        Unique UUID identifying this specific agent execution. Used for
+        ephemeral state indexing in Redis (Phase 12).
+    started_at_iso:
+        ISO 8601 UTC timestamp when this run was initiated.
     history:
         Previous ``Message`` rows loaded from the database, in chronological
         order, bounded by ``conversation_history_limit``.  Used **only** for
@@ -70,6 +77,12 @@ class AgentState:
     question: str
     user: User
     conversation_id: str | None
+
+    # Run identity and timing (Phase 12)
+    run_id: str = field(default_factory=lambda: str(uuid4()))
+    started_at_iso: str = field(
+        default_factory=lambda: datetime.now(UTC).isoformat()
+    )
 
     # Conversation memory (bounded by history_limit)
     history: list[Message] = field(default_factory=list)
