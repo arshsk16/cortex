@@ -57,8 +57,10 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING
 
+from cortex.agent.events import AgentEvent
 from cortex.agent.prompt import AgentPromptBuilder
 from cortex.agent.registry import ToolRegistry
 from cortex.agent.result import AgentResult, ToolCallRecord
@@ -258,6 +260,157 @@ class AgentService:
             answer=final_answer,
             tool_calls=state.tool_calls,
             retrieved_chunks=state.retrieved_chunks,
+        )
+
+    async def stream(
+        self,
+        *,
+        question: str,
+        user: User,
+        conversation_id: str | None = None,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        """Run the agent and yield SSE events incrementally.
+
+        Yields
+        ------
+        ToolCallEvent
+            Immediately when the LLM selects a tool (before execution).
+        ToolResultEvent
+            After the tool returns (observation truncated to 500 chars).
+        TokenEvent
+            Each text chunk of the final streamed LLM answer.
+        DoneEvent
+            On successful completion; mirrors AgentResponse field names.
+        ErrorEvent
+            On unrecoverable failure; stream ends.
+
+        The tool-calling loop (native or prompt-based) runs identically to
+        :meth:`run` — not streamed.  Only the final grounded-answer LLM call
+        uses :meth:`~cortex.llm.base.LLMProvider.generate_stream`.
+
+        Conversation ownership, history loading, user-message persistence, and
+        assistant-message persistence follow the same rules as :meth:`run`.
+        """
+        from cortex.agent.events import (
+            DoneEvent,
+            ErrorEvent,
+            TokenEvent,
+        )
+        from cortex.llm.base import SupportsToolCalling
+
+        question = question.strip()
+        if not question:
+            yield ErrorEvent(message="Agent question must not be empty")
+            return
+
+        # ------------------------------------------------------------------
+        # Phase 1: Build AgentState (security gate + history + persist user msg)
+        # ------------------------------------------------------------------
+        try:
+            state = await self._build_state(
+                question=question,
+                user=user,
+                conversation_id=conversation_id,
+            )
+        except Exception as exc:
+            yield ErrorEvent(message=str(exc))
+            return
+
+        # ------------------------------------------------------------------
+        # Phase 2: Tool-calling loop with event emission
+        # ------------------------------------------------------------------
+        try:
+            if isinstance(self._llm, SupportsToolCalling):
+                async for event in self._native_tool_loop_stream(state=state):
+                    yield event
+            else:
+                async for event in self._prompt_tool_loop_stream(state=state):
+                    yield event
+        except Exception as exc:
+            yield ErrorEvent(message=f"Tool loop failed: {exc}")
+            return
+
+        # ------------------------------------------------------------------
+        # Phase 3: Stream final grounded answer token-by-token
+        # ------------------------------------------------------------------
+        grounded_prompt = self._prompt_builder.build(
+            question=question,
+            retrieved_chunks=state.retrieved_chunks,
+            history=state.history if state.has_history else None,
+        )
+
+        final_parts: list[str] = []
+        try:
+            token_stream = await self._llm.generate_stream(grounded_prompt)
+            async for token in token_stream:
+                if token:
+                    final_parts.append(token)
+                    yield TokenEvent(text=token)
+        except ServiceUnavailableError as exc:
+            yield ErrorEvent(message=f"LLM streaming failed: {exc}")
+            return
+        except Exception as exc:
+            yield ErrorEvent(message=f"LLM streaming failed: {exc}")
+            return
+
+        final_answer = "".join(final_parts)
+
+        logger.info(
+            "Agent stream complete: user_id=%s conversation_id=%s "
+            "tool_calls=%d chunks=%d history=%d elapsed_ms=%.1f",
+            user.id,
+            conversation_id,
+            state.total_tool_calls,
+            len(state.retrieved_chunks),
+            len(state.history),
+            state.elapsed_ms,
+        )
+
+        # ------------------------------------------------------------------
+        # Phase 4: Persist assistant message + token usage
+        # ------------------------------------------------------------------
+        if conversation_id and self._conv_service:
+            citation_dicts = [
+                {
+                    "document_id": c.document_id,
+                    "chunk_id": c.chunk_id,
+                    "chunk_index": c.chunk_index,
+                }
+                for c in state.retrieved_chunks
+            ]
+            await self._conv_service.add_message(
+                conversation_id=conversation_id,
+                role="assistant",
+                content=final_answer,
+                citations=citation_dicts or None,
+            )
+            prompt_tokens = len(grounded_prompt) // 4
+            completion_tokens = len(final_answer) // 4
+            await self._conv_service.record_token_usage(
+                conversation_id=conversation_id,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            )
+
+        # Build done event (mirrors AgentResponse field names)
+        tool_calls_made = [
+            {"tool_name": tc.tool_name, "args": tc.args, "observation": tc.observation}
+            for tc in state.tool_calls
+        ]
+        citations = [
+            {
+                "document_id": c.document_id,
+                "chunk_id": c.chunk_id,
+                "chunk_index": c.chunk_index,
+            }
+            for c in state.retrieved_chunks
+        ]
+        yield DoneEvent(
+            answer=final_answer,
+            tool_calls_made=tool_calls_made,
+            citations=citations,
+            conversation_id=conversation_id,
         )
 
     # ------------------------------------------------------------------
@@ -496,6 +649,204 @@ class AgentService:
             else:
                 logger.warning(
                     "Agent prompt loop: unexpected action=%r; treating as final answer",
+                    action,
+                )
+                break
+
+    # ------------------------------------------------------------------
+    # Private — Streaming tool-calling loops (Phase 11)
+    # ------------------------------------------------------------------
+
+    async def _native_tool_loop_stream(
+        self, *, state: AgentState
+    ) -> AsyncGenerator[AgentEvent, None]:
+        """Native tool-calling loop that yields ToolCallEvent/ToolResultEvent.
+
+        Mirrors :meth:`_native_tool_loop` exactly but yields events before and
+        after each tool execution.  All state writes (tool_calls,
+        retrieved_chunks) are identical.
+        """
+        from cortex.agent.events import ToolCallEvent, ToolResultEvent
+        from cortex.llm.base import SupportsToolCalling
+
+        assert isinstance(self._llm, SupportsToolCalling)
+
+        messages: list[AgentMessage] = [
+            AgentMessage(role="user", text=state.question)
+        ]
+
+        for iteration in range(self._max_tool_calls):
+            logger.debug(
+                "Agent native stream loop iteration=%d user_id=%s",
+                iteration + 1,
+                state.user.id,
+            )
+
+            try:
+                result = await self._llm.generate_with_tools(
+                    messages=messages,
+                    tool_schemas=self._registry.tool_schemas,
+                )
+            except ServiceUnavailableError:
+                raise
+            except Exception as exc:
+                raise ServiceUnavailableError(
+                    "LLM generate_with_tools failed during agent stream loop",
+                    details={"reason": str(exc)},
+                ) from exc
+
+            if result.is_text:
+                logger.info(
+                    "Agent native stream loop: text after %d tool call(s)",
+                    state.total_tool_calls,
+                )
+                break
+
+            tc: ToolCallRequest = result.tool_call  # type: ignore[assignment]
+            tool_name = tc.tool_name
+
+            # Emit tool_call event (before execution)
+            yield ToolCallEvent(tool_name=tool_name, args=tc.args)
+
+            messages.append(AgentMessage(role="model", tool_call=tc))
+
+            try:
+                observation = await self._registry.dispatch(
+                    name=tool_name,
+                    args=tc.args,
+                    user=state.user,
+                )
+            except BadRequestError as exc:
+                observation = f"Tool error: {exc.message}"
+                logger.warning(
+                    "Agent native stream loop: tool %r raised BadRequestError: %s",
+                    tool_name,
+                    exc.message,
+                )
+
+            # Accumulate RAG results
+            tool_obj = None
+            with contextlib.suppress(BadRequestError):
+                tool_obj = self._registry.get_tool(tool_name)
+            if isinstance(tool_obj, RAGSearchTool):
+                state.retrieved_chunks.extend(tool_obj.last_results)
+
+            state.tool_calls.append(
+                ToolCallRecord(
+                    tool_name=tool_name,
+                    args=tc.args,
+                    observation=observation,
+                )
+            )
+
+            # Emit tool_result event (bounded preview)
+            yield ToolResultEvent.from_observation(tool_name, observation)
+
+            messages.append(
+                AgentMessage(
+                    role="tool",
+                    tool_result=ToolResult(
+                        tool_name=tool_name,
+                        output=observation,
+                        call_id=tc.call_id,
+                    ),
+                )
+            )
+
+        else:
+            logger.warning(
+                "Agent native stream loop: reached max_tool_calls=%d",
+                self._max_tool_calls,
+            )
+
+    async def _prompt_tool_loop_stream(
+        self, *, state: AgentState
+    ) -> AsyncGenerator[AgentEvent, None]:
+        """Prompt-based tool-calling loop that yields ToolCallEvent/ToolResultEvent.
+
+        Mirrors :meth:`_prompt_tool_loop` exactly but yields events.
+        All state writes are identical.
+        """
+        from cortex.agent.events import ToolCallEvent, ToolResultEvent
+
+        current_prompt = self._agent_prompt_builder.build_initial(
+            question=state.question,
+            tool_schemas=self._registry.tool_schemas,
+        )
+
+        loop_count = 0
+
+        while loop_count < self._max_tool_calls:
+            loop_count += 1
+            logger.debug(
+                "Agent prompt stream loop iteration=%d user_id=%s",
+                loop_count,
+                state.user.id,
+            )
+
+            try:
+                raw_response = await self._llm.generate(current_prompt)
+            except ServiceUnavailableError:
+                raise
+            except Exception as exc:
+                raise ServiceUnavailableError(
+                    "LLM generation failed during agent stream loop",
+                    details={"reason": str(exc)},
+                ) from exc
+
+            decision = self._parse_decision(raw_response)
+            action = decision.get("action", "")
+
+            if action == "final_answer":
+                logger.info(
+                    "Agent prompt stream loop: final_answer after %d tool call(s)",
+                    state.total_tool_calls,
+                )
+                break
+
+            if action == "tool_call":
+                tool_name = str(decision.get("tool", "")).strip()
+                tool_args: dict = decision.get("args", {})
+
+                # Emit tool_call event
+                yield ToolCallEvent(tool_name=tool_name or "unknown", args=tool_args)
+
+                try:
+                    observation = await self._registry.dispatch(
+                        name=tool_name,
+                        args=tool_args,
+                        user=state.user,
+                    )
+                except BadRequestError as exc:
+                    observation = f"Tool error: {exc.message}"
+                    tool_name = tool_name or "unknown"
+
+                tool_obj = None
+                with contextlib.suppress(BadRequestError):
+                    tool_obj = self._registry.get_tool(tool_name)
+                if isinstance(tool_obj, RAGSearchTool):
+                    state.retrieved_chunks.extend(tool_obj.last_results)
+
+                state.tool_calls.append(
+                    ToolCallRecord(
+                        tool_name=tool_name,
+                        args=tool_args,
+                        observation=observation,
+                    )
+                )
+
+                # Emit tool_result event
+                yield ToolResultEvent.from_observation(tool_name, observation)
+
+                current_prompt = self._agent_prompt_builder.build_observation_turn(
+                    previous_prompt=current_prompt,
+                    llm_decision=raw_response,
+                    tool_name=tool_name,
+                    observation=observation,
+                )
+            else:
+                logger.warning(
+                    "Agent prompt stream loop: unexpected action=%r",
                     action,
                 )
                 break
