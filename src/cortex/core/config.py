@@ -93,6 +93,21 @@ class Settings(BaseSettings):
         description="Access token lifetime in minutes",
     )
 
+    # Document storage
+    document_storage_path: str = Field(
+        default="storage/documents",
+        description="Directory where uploaded document files are stored",
+    )
+    document_max_file_size_bytes: int = Field(
+        default=26_214_400,
+        ge=1,
+        description="Maximum upload size in bytes (default 25 MB)",
+    )
+    document_allowed_mime_type: str = Field(
+        default="application/pdf",
+        description="Allowed MIME type for document uploads",
+    )
+
     @field_validator("database_url")
     @classmethod
     def validate_database_url(cls, value: str) -> str:

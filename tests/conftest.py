@@ -12,13 +12,16 @@ from httpx import ASGITransport, AsyncClient
 
 from cortex.core.config import Settings
 from cortex.core.security import hash_password
+from cortex.db.models.document import Document, DocumentStatus
 from cortex.db.models.user import User, UserRole
 from cortex.db.session import Database
 from cortex.main import create_app
 
+MINIMAL_PDF_BYTES = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF"
+
 
 @pytest.fixture
-def test_settings() -> Settings:
+def test_settings(tmp_path) -> Settings:
     """Settings suitable for unit tests (no live database required)."""
     return Settings(
         app_name="Cortex",
@@ -32,6 +35,9 @@ def test_settings() -> Settings:
         jwt_secret_key="test-secret-key-that-is-at-least-32-chars",
         jwt_algorithm="HS256",
         jwt_access_token_expire_minutes=60,
+        document_storage_path=str(tmp_path / "documents"),
+        document_max_file_size_bytes=26_214_400,
+        document_allowed_mime_type="application/pdf",
     )
 
 
@@ -71,3 +77,46 @@ def sample_user() -> User:
         created_at=now,
         updated_at=now,
     )
+
+
+@pytest.fixture
+def other_user() -> User:
+    """Second user for ownership isolation tests."""
+    now = datetime.now(UTC)
+    return User(
+        id=str(uuid4()),
+        email="bob@example.com",
+        username="bob",
+        full_name="Bob Example",
+        hashed_password=hash_password("Password1"),
+        role=UserRole.USER,
+        is_active=True,
+        is_verified=False,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+@pytest.fixture
+def sample_document(sample_user: User) -> Document:
+    """In-memory Document owned by ``sample_user``."""
+    now = datetime.now(UTC)
+    return Document(
+        id=str(uuid4()),
+        user_id=sample_user.id,
+        title="Sample Report",
+        original_filename="report.pdf",
+        storage_filename=f"{uuid4()}.pdf",
+        storage_path="storage/documents/sample.pdf",
+        mime_type="application/pdf",
+        file_size=len(MINIMAL_PDF_BYTES),
+        status=DocumentStatus.UPLOADED,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+@pytest.fixture
+def minimal_pdf_bytes() -> bytes:
+    """Minimal bytes that satisfy PDF magic-byte validation."""
+    return MINIMAL_PDF_BYTES

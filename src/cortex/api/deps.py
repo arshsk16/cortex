@@ -15,7 +15,9 @@ from cortex.core.security import decode_access_token
 from cortex.db.models.user import User
 from cortex.db.session import Database, get_session
 from cortex.services.auth import AuthService
+from cortex.services.document import DocumentService
 from cortex.services.health import HealthService
+from cortex.services.storage import StorageService
 from cortex.services.user import UserService
 
 _bearer_scheme = HTTPBearer(auto_error=False)
@@ -58,6 +60,26 @@ def get_auth_service(
     return AuthService(session=session, settings=settings, user_service=user_service)
 
 
+def get_storage_service(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> StorageService:
+    """Construct a StorageService bound to configured storage settings."""
+    return StorageService(settings)
+
+
+def get_document_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    storage_service: Annotated[StorageService, Depends(get_storage_service)],
+) -> DocumentService:
+    """Construct a request-scoped DocumentService."""
+    return DocumentService(
+        session=session,
+        settings=settings,
+        storage_service=storage_service,
+    )
+
+
 async def get_current_user(
     credentials: Annotated[
         HTTPAuthorizationCredentials | None,
@@ -93,5 +115,7 @@ SessionDep = Annotated[AsyncSession, Depends(get_db_session)]
 HealthServiceDep = Annotated[HealthService, Depends(get_health_service)]
 UserServiceDep = Annotated[UserService, Depends(get_user_service)]
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
+StorageServiceDep = Annotated[StorageService, Depends(get_storage_service)]
+DocumentServiceDep = Annotated[DocumentService, Depends(get_document_service)]
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 CurrentActiveUserDep = Annotated[User, Depends(get_current_active_user)]

@@ -86,6 +86,18 @@ class ForbiddenError(CortexError):
         super().__init__(message, code="forbidden", details=details)
 
 
+class BadRequestError(CortexError):
+    """Raised when a request is invalid or fails domain validation."""
+
+    def __init__(
+        self,
+        message: str = "Bad request",
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, code="bad_request", details=details)
+
+
 def _error_body(
     *,
     code: str,
@@ -112,6 +124,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             "service_unavailable": status.HTTP_503_SERVICE_UNAVAILABLE,
             "unauthorized": status.HTTP_401_UNAUTHORIZED,
             "forbidden": status.HTTP_403_FORBIDDEN,
+            "bad_request": status.HTTP_400_BAD_REQUEST,
         }
         headers: dict[str, str] | None = None
         if exc.code == "unauthorized":

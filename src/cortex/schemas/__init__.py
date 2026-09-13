@@ -6,12 +6,22 @@ from cortex.schemas.auth import (
     UserLoginRequest,
     UserRegisterRequest,
 )
+from cortex.schemas.document import (
+    DocumentCreate,
+    DocumentList,
+    DocumentRead,
+    DocumentResponse,
+)
 from cortex.schemas.health import ComponentHealth, HealthResponse
 from cortex.schemas.user import UserCreate, UserRead, UserUpdate
 
 __all__ = [
     "AuthResponse",
     "ComponentHealth",
+    "DocumentCreate",
+    "DocumentList",
+    "DocumentRead",
+    "DocumentResponse",
     "HealthResponse",
     "TokenResponse",
     "UserCreate",

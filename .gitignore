@@ -52,3 +52,6 @@ alembic/versions/*.pyc
 
 # uv
 uv.lock.bak
+
+# Uploaded documents (local storage)
+storage/documents/

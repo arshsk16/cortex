@@ -2,6 +2,7 @@
 
 from cortex.core.config import Settings, get_settings
 from cortex.core.exceptions import (
+    BadRequestError,
     ConflictError,
     CortexError,
     ForbiddenError,
@@ -11,6 +12,7 @@ from cortex.core.exceptions import (
 )
 
 __all__ = [
+    "BadRequestError",
     "ConflictError",
     "CortexError",
     "ForbiddenError",

@@ -40,6 +40,17 @@ Health check: [http://localhost:8000/api/v1/health](http://localhost:8000/api/v1
 
 Set a strong `JWT_SECRET_KEY` (min 32 characters) in `.env` before deploying.
 
+## Document management (Phase 2)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/documents/upload` | Upload PDF (max 25 MB); returns metadata |
+| `GET` | `/api/v1/documents` | List owned documents (paginated) |
+| `GET` | `/api/v1/documents/{id}` | Retrieve owned document metadata |
+| `DELETE` | `/api/v1/documents/{id}` | Delete owned document and stored file |
+
+Uploaded files are stored under `storage/documents/` (configurable via `DOCUMENT_STORAGE_PATH`).
+
 ## Project layout
 
 ```
