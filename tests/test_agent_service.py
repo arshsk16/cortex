@@ -486,3 +486,87 @@ class TestAgentConversationPersistence:
 
         mock_conv_service.add_message.assert_not_called()
         mock_conv_service.record_token_usage.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test: Memory extraction background task scheduling
+# ---------------------------------------------------------------------------
+
+
+class TestAgentMemoryExtractionBackgroundTasks:
+    async def test_run_schedules_memory_extraction_task(
+        self, mock_llm_provider, mock_retriever, sample_user
+    ) -> None:
+        from fastapi import BackgroundTasks
+
+        mock_llm_provider.generate = AsyncMock(
+            side_effect=[
+                json.dumps({"action": "final_answer", "answer": "I remember you."}),
+                "I remember you.",
+            ]
+        )
+        registry = _make_registry(mock_retriever)
+        mock_extractor = MagicMock()
+        service = AgentService(
+            llm_provider=mock_llm_provider,
+            tool_registry=registry,
+            prompt_builder=PromptBuilder(),
+            memory_extractor=mock_extractor,
+        )
+
+        bg_tasks = MagicMock(spec=BackgroundTasks)
+        result = await service.run(
+            question="My name is Bob.",
+            user=sample_user,
+            background_tasks=bg_tasks,
+        )
+
+        assert result.answer == "I remember you."
+        bg_tasks.add_task.assert_called_once_with(
+            mock_extractor.extract_and_store,
+            user=sample_user,
+            question="My name is Bob.",
+            answer="I remember you.",
+            memory_hits=[],
+        )
+
+    async def test_stream_schedules_memory_extraction_task(
+        self, mock_llm_provider, mock_retriever, sample_user
+    ) -> None:
+        from fastapi import BackgroundTasks
+
+        async def _gen():
+            yield "I "
+            yield "remember."
+
+        mock_llm_provider.generate = AsyncMock(
+            return_value=json.dumps(
+                {"action": "final_answer", "answer": "I remember."}
+            )
+        )
+        mock_llm_provider.generate_stream = AsyncMock(return_value=_gen())
+        registry = _make_registry(mock_retriever)
+        mock_extractor = MagicMock()
+        service = AgentService(
+            llm_provider=mock_llm_provider,
+            tool_registry=registry,
+            prompt_builder=PromptBuilder(),
+            memory_extractor=mock_extractor,
+        )
+
+        bg_tasks = MagicMock(spec=BackgroundTasks)
+        events = []
+        async for ev in service.stream(
+            question="My name is Bob.",
+            user=sample_user,
+            background_tasks=bg_tasks,
+        ):
+            events.append(ev)
+
+        bg_tasks.add_task.assert_called_once_with(
+            mock_extractor.extract_and_store,
+            user=sample_user,
+            question="My name is Bob.",
+            answer="I remember.",
+            memory_hits=[],
+        )

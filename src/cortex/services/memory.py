@@ -29,6 +29,7 @@ from cortex.schemas.memory import (
     MemoryList,
     MemoryRead,
     MemorySearchResult,
+    MemoryUpdate,
 )
 from cortex.vectorstore.memory_store import MemoryVectorStore
 
@@ -116,6 +117,37 @@ class MemoryService:
             skip=skip,
             limit=limit,
         )
+
+    async def update(
+        self,
+        *,
+        memory_id: str,
+        user: User,
+        payload: MemoryUpdate,
+    ) -> MemoryRead:
+        """Update a memory owned by ``user`` and re-index its embedding in Chroma."""
+        memory = await self._get_owned(memory_id=memory_id, user=user)
+
+        # 1. Update PostgreSQL first
+        memory.content = payload.content
+        await self._session.flush()
+        await self._session.refresh(memory)
+
+        # 2. Embed and upsert to Chroma
+        embedding = await self._embedding_provider.embed(payload.content)
+        await self._vector_store.upsert(
+            memory_id=memory.id,
+            user_id=user.id,
+            embedding=embedding,
+        )
+
+        logger.info(
+            "Updated memory id=%s user_id=%s content_len=%d",
+            memory.id,
+            user.id,
+            len(payload.content),
+        )
+        return MemoryRead.model_validate(memory)
 
     async def delete(self, *, memory_id: str, user: User) -> None:
         """Delete a memory owned by ``user`` from both PostgreSQL and Chroma."""

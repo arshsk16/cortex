@@ -20,6 +20,14 @@ class MemoryCreate(BaseModel):
     )
 
 
+
+class MemoryUpdate(BaseModel):
+    """Request body for updating an existing memory."""
+
+    content: str = Field(
+        ..., min_length=1, max_length=10_000, description="Updated memory text content"
+    )
+
 class MemoryRead(BaseModel):
     """Public memory record returned by the API."""
 
@@ -76,3 +84,23 @@ class MemorySearchResponse(BaseModel):
 
     results: list[MemorySearchResult]
     query: str
+
+
+class MemoryExtractionItem(BaseModel):
+    """A single memory extraction action from the LLM."""
+
+    action: str = Field(
+        ..., description="Action to perform: 'create' or 'update'"
+    )
+    content: str = Field(
+        ..., description="The new or updated fact to save"
+    )
+    target_memory_id: str | None = Field(
+        default=None, description="The ID of the memory to update, if applicable"
+    )
+
+
+class MemoryExtractionResult(BaseModel):
+    """Structured output from the memory extractor LLM."""
+
+    items: list[MemoryExtractionItem]

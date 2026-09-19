@@ -34,7 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, BackgroundTasks, status
 from fastapi.responses import StreamingResponse
 
 from cortex.agent.events import ErrorEvent, format_sse
@@ -71,6 +71,7 @@ async def agent_run_stream(
     current_user: CurrentActiveUserDep,
     agent_service: AgentServiceDep,
     session: SessionDep,
+    background_tasks: BackgroundTasks,
 ) -> StreamingResponse:
     """Stream agent execution events for the given question."""
 
@@ -80,6 +81,7 @@ async def agent_run_stream(
                 question=payload.message,
                 user=current_user,
                 conversation_id=payload.conversation_id,
+                background_tasks=background_tasks,
             ):
                 yield format_sse(event)
                 await asyncio.sleep(0)  # yield control to event loop

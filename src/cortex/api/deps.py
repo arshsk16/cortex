@@ -31,6 +31,7 @@ from cortex.services.document import DocumentService
 from cortex.services.health import HealthService
 from cortex.services.ingestion import IngestionService
 from cortex.services.memory import MemoryService
+from cortex.services.memory_extractor import MemoryExtractorService
 from cortex.services.parser import ParserService
 from cortex.services.prompt_builder import PromptBuilder
 from cortex.services.rag import RAGService
@@ -252,6 +253,9 @@ def get_agent_service(
     conv_service: Annotated[ConversationService, Depends(get_conversation_service)],
     state_store: Annotated[StateStore, Depends(get_state_store)],
     memory_service: Annotated[MemoryService, Depends(get_memory_service)],
+    memory_extractor: Annotated[
+        MemoryExtractorService, Depends(get_memory_extractor_service)
+    ],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> AgentService:
     """Construct a request-scoped AgentService with all three tools registered."""
@@ -270,6 +274,7 @@ def get_agent_service(
         state_ttl_seconds=settings.agent_state_ttl_seconds,
         memory_service=memory_service,
         memory_retrieval_limit=settings.agent_memory_retrieval_limit,
+        memory_extractor=memory_extractor,
     )
 
 
@@ -321,4 +326,19 @@ CurrentActiveUserDep = Annotated[User, Depends(get_current_active_user)]
 
 
 
+
+
+def get_memory_extractor_service(
+    llm_provider: Annotated[LLMProvider, Depends(get_llm_provider)],
+    database: Annotated[Database, Depends(get_database)],
+    embedding_provider: Annotated[EmbeddingProvider, Depends(get_embedding_provider)],
+    memory_vector_store: Annotated[MemoryVectorStore, Depends(get_memory_vector_store)],
+) -> MemoryExtractorService:
+    """Construct a MemoryExtractorService with an independent session factory."""
+    return MemoryExtractorService(
+        llm_provider=llm_provider,
+        session_factory=database.session_factory,
+        embedding_provider=embedding_provider,
+        memory_vector_store=memory_vector_store,
+    )
 

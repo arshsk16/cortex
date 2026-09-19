@@ -21,6 +21,7 @@ from cortex.schemas.memory import (
     MemoryList,
     MemoryRead,
     MemorySearchResult,
+    MemoryUpdate,
 )
 from cortex.services.memory import MemoryService
 from cortex.vectorstore.memory_store import MemoryVectorStore
@@ -259,6 +260,91 @@ async def test_list_memories_with_results(
 
     assert result.total == 3
     assert len(result.items) == 3
+
+
+# ---------------------------------------------------------------------------
+# update()
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_memory_success(
+    memory_service: MemoryService,
+    mock_session,
+    mock_embedding_provider,
+    mock_memory_vector_store,
+) -> None:
+    """update() updates PG record, flushes, re-embeds, and upserts Chroma."""
+    user = _make_user()
+    mem = _make_memory(user.id, content="Old memory content")
+
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = mem
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    payload = MemoryUpdate(content="New updated content")
+    result = await memory_service.update(
+        memory_id=mem.id,
+        user=user,
+        payload=payload,
+    )
+
+    assert mem.content == "New updated content"
+    mock_session.flush.assert_awaited_once()
+    mock_session.refresh.assert_awaited_once_with(mem)
+    mock_embedding_provider.embed.assert_awaited_once_with("New updated content")
+    mock_memory_vector_store.upsert.assert_awaited_once()
+    assert result.content == "New updated content"
+
+
+@pytest.mark.asyncio
+async def test_update_memory_not_found(
+    memory_service: MemoryService,
+    mock_session,
+    mock_memory_vector_store,
+) -> None:
+    """update() raises NotFoundError when memory is not found or not owned."""
+    user = _make_user()
+
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = None
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    payload = MemoryUpdate(content="New content")
+    with pytest.raises(NotFoundError, match="Memory not found"):
+        await memory_service.update(
+            memory_id=str(uuid4()),
+            user=user,
+            payload=payload,
+        )
+
+    mock_memory_vector_store.upsert.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_update_memory_chroma_failure_bubbles_up(
+    memory_service: MemoryService,
+    mock_session,
+    mock_memory_vector_store,
+) -> None:
+    """update() surfaces Chroma upsert failure to ensure failure awareness."""
+    user = _make_user()
+    mem = _make_memory(user.id, content="Old content")
+
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = mem
+    mock_session.execute = AsyncMock(return_value=mock_result)
+    mock_memory_vector_store.upsert = AsyncMock(
+        side_effect=RuntimeError("Chroma down")
+    )
+
+    payload = MemoryUpdate(content="New content")
+    with pytest.raises(RuntimeError, match="Chroma down"):
+        await memory_service.update(
+            memory_id=mem.id,
+            user=user,
+            payload=payload,
+        )
 
 
 # ---------------------------------------------------------------------------

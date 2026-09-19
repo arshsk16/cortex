@@ -60,6 +60,8 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
+from fastapi import BackgroundTasks
+
 from cortex.agent.events import AgentEvent
 from cortex.agent.prompt import AgentPromptBuilder
 from cortex.agent.registry import ToolRegistry
@@ -68,6 +70,7 @@ from cortex.agent.state import AgentState
 from cortex.agent.tools.rag_search import RAGSearchTool
 from cortex.agent.types import AgentMessage, ToolCallRequest, ToolResult
 from cortex.core.exceptions import BadRequestError, ServiceUnavailableError
+from cortex.services.memory_extractor import MemoryExtractorService
 from cortex.services.prompt_builder import PromptBuilder
 
 if TYPE_CHECKING:
@@ -139,6 +142,7 @@ class AgentService:
         state_ttl_seconds: int = _DEFAULT_STATE_TTL,
         memory_service: MemoryService | None = None,
         memory_retrieval_limit: int = _DEFAULT_MEMORY_LIMIT,
+        memory_extractor: MemoryExtractorService | None = None,
     ) -> None:
         self._llm = llm_provider
         self._registry = tool_registry
@@ -150,6 +154,7 @@ class AgentService:
         self._state_ttl = state_ttl_seconds
         self._memory_service = memory_service
         self._memory_limit = memory_retrieval_limit
+        self._memory_extractor = memory_extractor
         self._agent_prompt_builder = AgentPromptBuilder()
 
     # ------------------------------------------------------------------
@@ -162,6 +167,7 @@ class AgentService:
         question: str,
         user: User,
         conversation_id: str | None = None,
+        background_tasks: BackgroundTasks | None = None,
     ) -> AgentResult:
         """Run the agent on a user question and return the grounded answer.
 
@@ -288,6 +294,15 @@ class AgentService:
             # Clean up ephemeral state on success
             await self._delete_state(state)
 
+            if background_tasks is not None and self._memory_extractor is not None:
+                background_tasks.add_task(
+                    self._memory_extractor.extract_and_store,
+                    user=user,
+                    question=question,
+                    answer=final_answer,
+                    memory_hits=state.memory_hits,
+                )
+
             return AgentResult(
                 answer=final_answer,
                 tool_calls=state.tool_calls,
@@ -303,6 +318,7 @@ class AgentService:
         question: str,
         user: User,
         conversation_id: str | None = None,
+        background_tasks: BackgroundTasks | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Run the agent and yield SSE events incrementally.
 
@@ -453,6 +469,15 @@ class AgentService:
                 }
                 for c in state.retrieved_chunks
             ]
+            if background_tasks is not None and self._memory_extractor is not None:
+                background_tasks.add_task(
+                    self._memory_extractor.extract_and_store,
+                    user=user,
+                    question=question,
+                    answer=final_answer,
+                    memory_hits=state.memory_hits,
+                )
+
             yield DoneEvent(
                 answer=final_answer,
                 tool_calls_made=tool_calls_made,

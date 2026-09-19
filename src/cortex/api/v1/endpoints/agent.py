@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, BackgroundTasks, status
 
 from cortex.api.deps import AgentServiceDep, CurrentActiveUserDep, SessionDep
 from cortex.schemas.agent import (
@@ -47,12 +47,14 @@ async def agent_run(
     current_user: CurrentActiveUserDep,
     agent_service: AgentServiceDep,
     session: SessionDep,
+    background_tasks: BackgroundTasks,
 ) -> AgentResponse:
     """Run the agent and return the grounded answer with tool trace."""
     result = await agent_service.run(
         question=payload.message,
         user=current_user,
         conversation_id=payload.conversation_id,
+        background_tasks=background_tasks,
     )
 
     await session.commit()

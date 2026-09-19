@@ -583,6 +583,7 @@ class TestLifespanAndDependencies:
             conv_service=MagicMock(),
             state_store=mock_store,
             memory_service=MagicMock(),
+            memory_extractor=MagicMock(),
             settings=settings,
         )
 

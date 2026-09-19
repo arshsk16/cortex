@@ -785,11 +785,14 @@ class TestCancellationHandling:
         user = _make_user()
 
         # Obtain the StreamingResponse
+        from fastapi import BackgroundTasks
+
         response = await agent_run_stream(
             payload=payload,
             current_user=user,
             agent_service=agent_svc,
             session=session,
+            background_tasks=BackgroundTasks(),
         )
 
         # Pull out the generator from StreamingResponse.body_iterator
