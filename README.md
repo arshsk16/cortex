@@ -17,6 +17,8 @@ uv sync --all-extras
 # Copy environment file and edit DATABASE_URL if needed
 cp .env.example .env
 
+# Configure DATABASE_URL and JWT_SECRET_KEY in .env
+
 # Apply database migrations (once models exist)
 uv run alembic upgrade head
 
