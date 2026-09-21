@@ -7,8 +7,16 @@ from typing import Any
 
 from cortex.retrieval.models import RetrievalResult
 
+# ---------------------------------------------------------------------------
+# Sentinel constants for ToolCallRecord.status
+# ---------------------------------------------------------------------------
 
-@dataclass(frozen=True, slots=True)
+TOOL_STATUS_OK = "ok"
+TOOL_STATUS_ERROR = "error"
+TOOL_STATUS_SKIPPED = "skipped"
+
+
+@dataclass
 class ToolCallRecord:
     """Record of a single tool invocation within an agent run.
 
@@ -20,11 +28,20 @@ class ToolCallRecord:
         Arguments passed to the tool.
     observation:
         The plain-text result returned by the tool.
+    status:
+        Outcome of the tool call.  One of ``"ok"``, ``"error"``, or
+        ``"skipped"`` (duplicate call suppressed by deduplication).
+        Defaults to ``"ok"`` for backward compatibility.
+    duration_ms:
+        Wall-clock milliseconds the tool execution took.  ``0.0`` when not
+        measured (e.g. skipped calls or legacy code paths).
     """
 
     tool_name: str
     args: dict[str, Any]
     observation: str
+    status: str = TOOL_STATUS_OK
+    duration_ms: float = 0.0
 
 
 @dataclass

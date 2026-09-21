@@ -251,17 +251,26 @@ class TestAgentToolCallCap:
     async def test_loop_stops_at_max_tool_calls(
         self, mock_llm_provider, mock_retriever, sample_user
     ) -> None:
-        """Agent must stop after max_tool_calls and proceed to grounded answer."""
-        # LLM always wants to call rag_search — never reaches final_answer naturally
-        always_tool = json.dumps(
-            {
-                "action": "tool_call",
-                "tool": "rag_search",
-                "args": {"query": "test"},
-            }
-        )
+        """Agent must stop after max_tool_calls and proceed to grounded answer.
+
+        Phase 14 note: deduplication skips repeated (tool, args) pairs.
+        This test uses distinct query args so all 3 calls are unique and
+        are actually dispatched to the retriever.
+        """
+        import json as _json
+        # Each call uses a different query - deduplication does NOT fire
+        tool_calls = [
+            _json.dumps(
+                {
+                    "action": "tool_call",
+                    "tool": "rag_search",
+                    "args": {"query": f"test_{i}"},
+                }
+            )
+            for i in range(1, 4)
+        ]
         mock_llm_provider.generate = AsyncMock(
-            side_effect=[always_tool] * 10 + ["Final grounded answer."]
+            side_effect=tool_calls + ["Final grounded answer."]
         )
         registry = _make_registry(mock_retriever)
         service = _make_service(mock_llm_provider, registry, max_tool_calls=3)
@@ -270,7 +279,7 @@ class TestAgentToolCallCap:
 
         # Tool calls must be capped at 3
         assert len(result.tool_calls) == 3
-        # Retriever called 3 times
+        # All 3 calls were unique so retriever dispatched 3 times
         assert mock_retriever.retrieve.call_count == 3
 
 

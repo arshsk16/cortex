@@ -1,21 +1,31 @@
-"""AgentState — centralized carrier for a single agent run's memory context.
+"""AgentState - centralized carrier for a single agent run''s memory context.
 
 Phase 10 introduces a clean ``AgentState`` dataclass that replaces the loose
 local variables previously scattered through
 :meth:`~cortex.agent.service.AgentService.run`.
 
+Phase 14 adds:
+
+* ``plan`` - an optional ordered list of tool names the planner suggests
+  calling before the loop starts (prompt-based path only).
+* ``budget_exhausted`` - set to ``True`` when the tool-call budget is
+  consumed without a ``final_answer`` decision, so the final answer step
+  can communicate the constraint to the LLM.
+* ``tool_call_summary()`` - compact text rendering of the tool trace,
+  injected into the grounded-answer prompt for better synthesis quality.
+
 Design principles
 -----------------
-* **Immutable construction** — built once from loaded history + current question;
+* **Immutable construction** - built once from loaded history + current question;
   the ``tool_calls`` and ``retrieved_chunks`` fields are mutable lists that grow
   during the tool-calling loop, but the identity of the state object is fixed.
-* **Explicit memory boundary** — ``history`` (conversation memory) and
+* **Explicit memory boundary** - ``history`` (conversation memory) and
   ``retrieved_chunks`` (document grounding) are kept as separate, named fields.
   They must never be mixed: history provides context/tone; retrieved chunks are
   the authoritative evidence the LLM must ground its final answer in.
-* **Provider-agnostic** — contains no Gemini SDK types; carries only
+* **Provider-agnostic** - contains no Gemini SDK types; carries only
   :mod:`cortex.agent.types` and :mod:`cortex.agent.result` objects.
-* **Extensible** — fields are dataclass fields; future phases (semantic memory,
+* **Extensible** - fields are dataclass fields; future phases (semantic memory,
   session embeddings, user preferences) can add new fields without changing
   existing code paths.
 """
@@ -62,17 +72,29 @@ class AgentState:
         Empty list for stateless runs or first messages.
     tool_calls:
         Ordered trace of every tool invocation in this run.  Grows during the
-        tool-calling loop.
+        tool-calling loop.  Each record includes status and duration_ms
+        (Phase 14).
     retrieved_chunks:
         All :class:`~cortex.retrieval.models.RetrievalResult` objects
         accumulated across all RAG search tool calls.  Used for citation
         construction and grounded-answer prompt construction.
+    memory_hits:
+        Long-term memory entries retrieved at run start (Phase 13B).
+    plan:
+        Ordered list of tool names the planner suggests calling (Phase 14).
+        Empty list when planning is disabled or the native tool-calling path
+        is used (the provider plans internally).
+    budget_exhausted:
+        Set to ``True`` when the tool-call budget (``max_tool_calls``) is
+        consumed without the LLM returning a ``final_answer`` decision
+        (Phase 14).  The final answer step uses this to instruct the LLM to
+        synthesise a best-effort answer from what it has.
     started_at:
         ``time.perf_counter()`` value captured at the start of ``run()``.
         Used to compute total execution time in the log.
     extra:
-        Reserved dict for future extensions (e.g. semantic memory hits,
-        user preferences, session metadata).  Not used in Phase 10.
+        Reserved dict for future extensions (e.g. user preferences, session
+        metadata).  Not used in Phase 10-14.
     """
 
     question: str
@@ -95,10 +117,14 @@ class AgentState:
     # Long-term semantic memory hits retrieved at run start (Phase 13B)
     memory_hits: list[MemorySearchResult] = field(default_factory=list)
 
+    # Phase 14: Planning and budget tracking
+    plan: list[str] = field(default_factory=list)
+    budget_exhausted: bool = False
+
     # Execution metadata
     started_at: float = field(default_factory=time.perf_counter)
 
-    # Extensibility hook — unused in Phase 10
+    # Extensibility hook
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -124,3 +150,34 @@ class AgentState:
     def total_tool_calls(self) -> int:
         """Number of tool invocations made so far in this run."""
         return len(self.tool_calls)
+
+    def tool_call_summary(self) -> str:
+        """Return a compact multi-line summary of all tool calls made.
+
+        Used to inject the tool trace into the grounded-answer prompt so
+        the LLM has full context of what was retrieved/computed.
+
+        Returns an empty string when no tools were called.
+
+        Format (one line per call)::
+
+            [rag_search] query="Paris" -> Paris is the capital... (ok, 123ms)
+            [calculator] expression="2+2" -> Result: 4 (ok, 0ms)
+        """
+        if not self.tool_calls:
+            return ""
+
+        lines: list[str] = []
+        for tc in self.tool_calls:
+            # Truncate args values for readability
+            args_preview = ", ".join(
+                f'{k}="{str(v)[:60]}"' for k, v in tc.args.items()
+            )
+            obs_preview = tc.observation[:200].replace("\n", " ")
+            if len(tc.observation) > 200:
+                obs_preview += "..."
+            lines.append(
+                f"[{tc.tool_name}] {args_preview} -> {obs_preview}"
+                f" ({tc.status}, {tc.duration_ms:.0f}ms)"
+            )
+        return "\n".join(lines)

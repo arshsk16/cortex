@@ -1,62 +1,39 @@
-"""Agent orchestration service — single-agent + tool-calling loop.
+"""Agent orchestration service - single-agent + tool-calling loop.
 
-Architecture (Phase 10)
+Architecture (Phase 14)
 -----------------------
-``AgentService.run()`` has four phases, all sharing a single
-:class:`~cortex.agent.state.AgentState` object:
+AgentService.run() has four phases, all sharing a single AgentState object:
 
-1. **Build state** — security gate, load bounded conversation history,
-   persist user message, construct :class:`~cortex.agent.state.AgentState`.
+1. Build state - security gate, load bounded conversation history,
+   persist user message, retrieve long-term memories.
 
-2. **Tool-calling loop** — dispatched to one of two strategies:
+2. Tool-calling loop - dispatched to one of two strategies:
+   * Native path: used when LLMProvider implements SupportsToolCalling.
+   * Prompt-based fallback: optionally runs AgentPlanner, parses JSON decisions.
 
-   * **Native path** (preferred) — used when the ``LLMProvider`` implements
-     :class:`~cortex.llm.base.SupportsToolCalling`.  Maintains a typed
-     message history and calls
-     :meth:`~cortex.llm.base.SupportsToolCalling.generate_with_tools`.
+   Both strategies apply Phase 14 improvements:
+   - Deduplication: duplicate tool calls are skipped with a synthetic observation.
+   - Status tracking: each ToolCallRecord records status and duration_ms.
+   - Budget tracking: budget_exhausted set when max_tool_calls is hit.
 
-   * **Prompt-based fallback** — used when the provider does *not* implement
-     ``SupportsToolCalling``.  Embeds tool schemas in the system prompt and
-     parses the LLM's JSON decision.  Identical to the Phase 8 loop.
+3. Grounded final answer - PromptBuilder assembles a structured prompt.
+   When budget_exhausted, a note instructs best-effort synthesis.
+   A compact tool_call_summary() is appended to improve synthesis quality.
 
-   Both strategies write their results into ``state.tool_calls`` and
-   ``state.retrieved_chunks``.
+4. Persistence - assistant message, token usage, ephemeral state cleanup,
+   and memory extraction background task (Phase 13C).
 
-3. **Grounded final answer** —
-   :class:`~cortex.services.prompt_builder.PromptBuilder` constructs a
-   grounded prompt from the accumulated retrieval chunks **and the loaded
-   conversation history**, then :class:`~cortex.llm.base.LLMProvider`
-   generates the final citation-grounded answer.
-
-4. **Persist** — assistant message and token usage are written back to the
-   conversation if one was provided.
-
-Memory boundaries
------------------
-* ``state.history``  — previous ``Message`` rows from the DB, bounded by
-  ``conversation_history_limit``.  Injected into the **final grounded-answer
-  prompt only** (``PromptBuilder``).  Never passed to the tool-calling loop
-  to prevent compounding unverified context into tool decisions.
-* ``state.retrieved_chunks`` — live RAG results from this run's tool calls.
-  Always authoritative; used for citation construction and context grounding.
-
-Provider agnosticism
---------------------
-``AgentService`` imports only from :mod:`cortex.agent.types` and
-:mod:`cortex.agent.state`, never from the Gemini SDK.
-
-Conversation security
----------------------
-When ``conversation_id`` is supplied, :meth:`get_history` enforces ownership
-(raises ``ForbiddenError`` / ``NotFoundError``).  History is loaded **before**
-any tool call, so an ownership violation aborts the entire run.
+Streaming (stream()) mirrors run() but emits SSE events and streams
+the final answer token-by-token.
 """
+
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
@@ -65,7 +42,13 @@ from fastapi import BackgroundTasks
 from cortex.agent.events import AgentEvent
 from cortex.agent.prompt import AgentPromptBuilder
 from cortex.agent.registry import ToolRegistry
-from cortex.agent.result import AgentResult, ToolCallRecord
+from cortex.agent.result import (
+    TOOL_STATUS_ERROR,
+    TOOL_STATUS_OK,
+    TOOL_STATUS_SKIPPED,
+    AgentResult,
+    ToolCallRecord,
+)
 from cortex.agent.state import AgentState
 from cortex.agent.tools.rag_search import RAGSearchTool
 from cortex.agent.types import AgentMessage, ToolCallRequest, ToolResult
@@ -74,6 +57,7 @@ from cortex.services.memory_extractor import MemoryExtractorService
 from cortex.services.prompt_builder import PromptBuilder
 
 if TYPE_CHECKING:
+    from cortex.agent.planner import AgentPlanner
     from cortex.db.models.user import User
     from cortex.llm.base import LLMProvider
     from cortex.services.conversation import ConversationService
@@ -87,6 +71,23 @@ _DEFAULT_HISTORY_LIMIT = 10
 _DEFAULT_STATE_TTL = 1800  # 30 minutes
 _DEFAULT_MEMORY_LIMIT = 5  # max long-term memory hits per run
 
+# Injected when the LLM tries to call the same tool with the same args again.
+_DUPLICATE_TOOL_MSG = (
+    "Tool already called with these arguments in this run. "
+    "Use the observation already available above."
+)
+
+# Max chars injected per tool observation into the prompt (Phase 14).
+_MAX_OBSERVATION_CHARS = 4000
+
+
+def _freeze_args(args: dict[str, Any]) -> str:
+    """Return a stable string key for a tool-args dict (deduplication)."""
+    try:
+        return json.dumps(args, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return repr(sorted(args.items()))
+
 
 class AgentService:
     """Orchestrate a single-agent + tool-calling loop with conversation memory.
@@ -94,39 +95,31 @@ class AgentService:
     Parameters
     ----------
     llm_provider:
-        The application-scoped LLM provider.  If it also implements
-        :class:`~cortex.llm.base.SupportsToolCalling`, the native
-        function-calling path is used automatically.
+        The application-scoped LLM provider.
     tool_registry:
         Registry pre-populated with the available tools.
     prompt_builder:
         The existing PromptBuilder used for the final grounded-answer step.
     conversation_service:
-        Optional — when supplied, the agent enforces conversation ownership,
-        loads bounded conversation history, and persists the user/assistant
-        message pair.
+        Optional conversation service for history and persistence.
     max_tool_calls:
-        Maximum number of tool invocations per agent run.  Prevents infinite
-        loops in case the LLM keeps requesting tools.
+        Maximum number of tool invocations per agent run.
     conversation_history_limit:
-        Maximum number of previous messages loaded from the database to
-        include as conversation memory in the grounded-answer prompt.
-        Bounded to prevent unbounded context growth.  Defaults to 10.
+        Maximum number of previous messages to load.
     state_store:
-        Optional ephemeral state store (Redis or Null).  When supplied,
-        agent execution snapshots are saved at run start, after each tool
-        call, and deleted on successful completion (or marked ``failed``
-        on error).  Defaults to ``NullStateStore`` behaviour (no-op).
+        Optional ephemeral state store (Redis or Null).
     state_ttl_seconds:
-        TTL for Redis state snapshots.  Defaults to 1800 (30 minutes).
+        TTL for Redis state snapshots.
     memory_service:
-        Optional Phase 13A MemoryService.  When supplied, long-term memories
-        are retrieved at the start of each run and injected into the final
-        grounded-answer prompt as a separate ``LONG-TERM MEMORY`` section.
-        When ``None`` (default), memory retrieval is skipped entirely.
+        Optional MemoryService for long-term memory retrieval (Phase 13B).
     memory_retrieval_limit:
-        Maximum number of memory entries to retrieve per run.  Set to 0 to
-        disable retrieval even when a memory_service is configured.
+        Maximum number of memory entries to retrieve per run.
+    memory_extractor:
+        Optional Phase 13C MemoryExtractorService.
+    planner:
+        Optional Phase 14 AgentPlanner. When None (default), planning is
+        disabled. Only used on the prompt-based path; skipped for native
+        tool-calling providers.
     """
 
     def __init__(
@@ -143,6 +136,7 @@ class AgentService:
         memory_service: MemoryService | None = None,
         memory_retrieval_limit: int = _DEFAULT_MEMORY_LIMIT,
         memory_extractor: MemoryExtractorService | None = None,
+        planner: AgentPlanner | None = None,
     ) -> None:
         self._llm = llm_provider
         self._registry = tool_registry
@@ -155,6 +149,7 @@ class AgentService:
         self._memory_service = memory_service
         self._memory_limit = memory_retrieval_limit
         self._memory_extractor = memory_extractor
+        self._planner = planner
         self._agent_prompt_builder = AgentPromptBuilder()
 
     # ------------------------------------------------------------------
@@ -169,26 +164,7 @@ class AgentService:
         conversation_id: str | None = None,
         background_tasks: BackgroundTasks | None = None,
     ) -> AgentResult:
-        """Run the agent on a user question and return the grounded answer.
-
-        Parameters
-        ----------
-        question:
-            The user's natural-language question.
-        user:
-            Authenticated owner — passed through to every tool for ownership
-            enforcement.
-        conversation_id:
-            When set, ownership is verified, bounded conversation history is
-            loaded, and the user/assistant messages are persisted on
-            completion.
-
-        Returns
-        -------
-        AgentResult
-            Contains the final answer, tool-call trace, and accumulated
-            retrieval results for citation construction.
-        """
+        """Run the agent on a user question and return the grounded answer."""
         question = question.strip()
         if not question:
             raise BadRequestError(
@@ -196,12 +172,6 @@ class AgentService:
                 details={"field": "question"},
             )
 
-        # ------------------------------------------------------------------
-        # Phase 1: Build AgentState
-        #   a) Load bounded history (ownership enforced inside get_history)
-        #   b) Persist user message
-        #   c) Construct AgentState with all context for this run
-        # ------------------------------------------------------------------
         state = await self._build_state(
             question=question,
             user=user,
@@ -209,10 +179,7 @@ class AgentService:
         )
 
         try:
-            # ------------------------------------------------------------------
-            # Phase 2: Tool-calling loop — dispatched by provider capability
-            # ------------------------------------------------------------------
-            from cortex.llm.base import SupportsToolCalling  # local → avoids cycle
+            from cortex.llm.base import SupportsToolCalling
 
             if isinstance(self._llm, SupportsToolCalling):
                 logger.debug(
@@ -227,21 +194,20 @@ class AgentService:
                 )
                 await self._prompt_tool_loop(state=state)
 
-            # ------------------------------------------------------------------
-            # Phase 3: Generate grounded final answer
-            #   Pass conversation history so the LLM can maintain context/tone.
-            #   Retrieved chunks remain the authoritative evidence section.
-            #
-            #   Memory boundary:
-            #     state.history  → PromptBuilder history section (context/memory)
-            #     state.retrieved_chunks → PromptBuilder context section (evidence)
-            # ------------------------------------------------------------------
+            # Phase 14: augment question with tool-call summary for synthesis
+            question_with_summary = self._augment_question_with_summary(question, state)
             grounded_prompt = self._prompt_builder.build(
-                question=question,
+                question=question_with_summary,
                 retrieved_chunks=state.retrieved_chunks,
                 history=state.history if state.has_history else None,
                 memory_hits=state.memory_hits if state.has_memory_hits else None,
             )
+            if state.budget_exhausted:
+                grounded_prompt += (
+                    "\n\n[NOTE: The tool-call budget was exhausted. "
+                    "Synthesise a best-effort answer from the above context. "
+                    "Acknowledge any gaps honestly.]"
+                )
 
             try:
                 final_answer = await self._llm.generate(grounded_prompt)
@@ -255,18 +221,17 @@ class AgentService:
 
             logger.info(
                 "Agent run complete: user_id=%s conversation_id=%s "
-                "tool_calls=%d chunks=%d history=%d elapsed_ms=%.1f",
+                "tool_calls=%d chunks=%d history=%d "
+                "budget_exhausted=%s elapsed_ms=%.1f",
                 user.id,
                 conversation_id,
                 state.total_tool_calls,
                 len(state.retrieved_chunks),
                 len(state.history),
+                state.budget_exhausted,
                 state.elapsed_ms,
             )
 
-            # ------------------------------------------------------------------
-            # Phase 4: Persist assistant message + token usage
-            # ------------------------------------------------------------------
             if conversation_id and self._conv_service:
                 citation_dicts = [
                     {
@@ -291,7 +256,6 @@ class AgentService:
                     total_tokens=prompt_tokens + completion_tokens,
                 )
 
-            # Clean up ephemeral state on success
             await self._delete_state(state)
 
             if background_tasks is not None and self._memory_extractor is not None:
@@ -320,33 +284,8 @@ class AgentService:
         conversation_id: str | None = None,
         background_tasks: BackgroundTasks | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
-        """Run the agent and yield SSE events incrementally.
-
-        Yields
-        ------
-        ToolCallEvent
-            Immediately when the LLM selects a tool (before execution).
-        ToolResultEvent
-            After the tool returns (observation truncated to 500 chars).
-        TokenEvent
-            Each text chunk of the final streamed LLM answer.
-        DoneEvent
-            On successful completion; mirrors AgentResponse field names.
-        ErrorEvent
-            On unrecoverable failure; stream ends.
-
-        The tool-calling loop (native or prompt-based) runs identically to
-        :meth:`run` — not streamed.  Only the final grounded-answer LLM call
-        uses :meth:`~cortex.llm.base.LLMProvider.generate_stream`.
-
-        Conversation ownership, history loading, user-message persistence, and
-        assistant-message persistence follow the same rules as :meth:`run`.
-        """
-        from cortex.agent.events import (
-            DoneEvent,
-            ErrorEvent,
-            TokenEvent,
-        )
+        """Run the agent and yield SSE events incrementally."""
+        from cortex.agent.events import DoneEvent, ErrorEvent, TokenEvent
         from cortex.llm.base import SupportsToolCalling
 
         question = question.strip()
@@ -354,9 +293,6 @@ class AgentService:
             yield ErrorEvent(message="Agent question must not be empty")
             return
 
-        # ------------------------------------------------------------------
-        # Phase 1: Build AgentState (security gate + history + persist user msg)
-        # ------------------------------------------------------------------
         try:
             state = await self._build_state(
                 question=question,
@@ -368,9 +304,6 @@ class AgentService:
             return
 
         try:
-            # ------------------------------------------------------------------
-            # Phase 2: Tool-calling loop with event emission
-            # ------------------------------------------------------------------
             if isinstance(self._llm, SupportsToolCalling):
                 async for event in self._native_tool_loop_stream(state=state):
                     yield event
@@ -378,15 +311,19 @@ class AgentService:
                 async for event in self._prompt_tool_loop_stream(state=state):
                     yield event
 
-            # ------------------------------------------------------------------
-            # Phase 3: Stream final grounded answer token-by-token
-            # ------------------------------------------------------------------
+            question_with_summary = self._augment_question_with_summary(question, state)
             grounded_prompt = self._prompt_builder.build(
-                question=question,
+                question=question_with_summary,
                 retrieved_chunks=state.retrieved_chunks,
                 history=state.history if state.has_history else None,
                 memory_hits=state.memory_hits if state.has_memory_hits else None,
             )
+            if state.budget_exhausted:
+                grounded_prompt += (
+                    "\n\n[NOTE: The tool-call budget was exhausted. "
+                    "Synthesise a best-effort answer from the above context. "
+                    "Acknowledge any gaps honestly.]"
+                )
 
             final_parts: list[str] = []
             try:
@@ -413,18 +350,17 @@ class AgentService:
 
             logger.info(
                 "Agent stream complete: user_id=%s conversation_id=%s "
-                "tool_calls=%d chunks=%d history=%d elapsed_ms=%.1f",
+                "tool_calls=%d chunks=%d history=%d "
+                "budget_exhausted=%s elapsed_ms=%.1f",
                 user.id,
                 conversation_id,
                 state.total_tool_calls,
                 len(state.retrieved_chunks),
                 len(state.history),
+                state.budget_exhausted,
                 state.elapsed_ms,
             )
 
-            # ------------------------------------------------------------------
-            # Phase 4: Persist assistant message + token usage
-            # ------------------------------------------------------------------
             if conversation_id and self._conv_service:
                 citation_dicts = [
                     {
@@ -449,10 +385,8 @@ class AgentService:
                     total_tokens=prompt_tokens + completion_tokens,
                 )
 
-            # Clean up ephemeral state on success
             await self._delete_state(state)
 
-            # Build done event (mirrors AgentResponse field names)
             tool_calls_made = [
                 {
                     "tool_name": tc.tool_name,
@@ -495,7 +429,7 @@ class AgentService:
             return
 
     # ------------------------------------------------------------------
-    # Private — State construction
+    # Private - State construction
     # ------------------------------------------------------------------
 
     async def _build_state(
@@ -510,18 +444,15 @@ class AgentService:
         Performs three operations in order:
 
         1. Load bounded conversation history (ownership enforced by
-           :meth:`~cortex.services.conversation.ConversationService.get_history`).
+           ConversationService.get_history).
         2. Persist the incoming user message to the conversation (if one
            was provided).
         3. Retrieve long-term semantic memory hits for the current user
-           and question via :class:`~cortex.services.memory.MemoryService`
-           (Phase 13B).  Failure is non-fatal: the run continues without
-           memory context and a warning is logged.
+           and question via MemoryService (Phase 13B).  Failure is non-fatal.
         """
         history = []
 
         if conversation_id and self._conv_service:
-            # Load history first (get_history enforces ownership internally)
             history = await self._conv_service.get_history(
                 conversation_id=conversation_id,
                 user_id=user.id,
@@ -532,8 +463,6 @@ class AgentService:
                 conversation_id,
                 len(history),
             )
-
-            # Persist the incoming user message
             await self._conv_service.add_message(
                 conversation_id=conversation_id,
                 role="user",
@@ -544,7 +473,6 @@ class AgentService:
                 first_message=question,
             )
 
-        # Retrieve long-term memories (Phase 13B) -- bounded, user-scoped
         memory_hits = []
         if self._memory_service is not None and self._memory_limit > 0:
             try:
@@ -577,23 +505,31 @@ class AgentService:
         return state
 
     # ------------------------------------------------------------------
-    # Private — Native tool-calling loop (Phase 9)
+    # Private - Phase 14 helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _augment_question_with_summary(question: str, state: AgentState) -> str:
+        """Append compact tool-call summary to the question for grounded answer."""
+        summary = state.tool_call_summary()
+        if not summary:
+            return question
+        return (
+            f"{question}\n\n"
+            f"=== TOOL CALLS MADE ===\n{summary}\n=== END OF TOOL CALLS ==="
+        )
+
+    # ------------------------------------------------------------------
+    # Private - Native tool-calling loop (Phase 9, updated Phase 14)
     # ------------------------------------------------------------------
 
     async def _native_tool_loop(self, *, state: AgentState) -> None:
-        """Run the tool-calling loop using the provider's native API.
-
-        Writes results into ``state.tool_calls`` and
-        ``state.retrieved_chunks`` in-place.
-        """
+        """Native tool-calling loop with Phase 14 deduplication and tracking."""
         from cortex.llm.base import SupportsToolCalling
 
-        assert isinstance(self._llm, SupportsToolCalling)  # guaranteed by caller
-
-        # Seed conversation history with the user's question
-        messages: list[AgentMessage] = [
-            AgentMessage(role="user", text=state.question)
-        ]
+        assert isinstance(self._llm, SupportsToolCalling)
+        messages: list[AgentMessage] = [AgentMessage(role="user", text=state.question)]
+        seen_calls: set[tuple[str, str]] = set()
 
         for iteration in range(self._max_tool_calls):
             logger.debug(
@@ -622,14 +558,44 @@ class AgentService:
                 )
                 break
 
-            # LLM requested a tool call
             tc: ToolCallRequest = result.tool_call  # type: ignore[assignment]
             tool_name = tc.tool_name
-
-            # Append model's tool-call turn to history
+            frozen = (tool_name, _freeze_args(tc.args))
             messages.append(AgentMessage(role="model", tool_call=tc))
 
-            # Dispatch the tool
+            if frozen in seen_calls:
+                logger.info(
+                    "Agent native loop: skipping duplicate call to %r (iteration=%d)",
+                    tool_name,
+                    iteration + 1,
+                )
+                observation = _DUPLICATE_TOOL_MSG
+                state.tool_calls.append(
+                    ToolCallRecord(
+                        tool_name=tool_name,
+                        args=tc.args,
+                        observation=observation,
+                        status=TOOL_STATUS_SKIPPED,
+                        duration_ms=0.0,
+                    )
+                )
+                messages.append(
+                    AgentMessage(
+                        role="tool",
+                        tool_result=ToolResult(
+                            tool_name=tool_name,
+                            output=observation,
+                            call_id=tc.call_id,
+                        ),
+                    )
+                )
+                await self._save_state(state, status="in_progress")
+                continue
+
+            seen_calls.add(frozen)
+
+            t0 = time.perf_counter()
+            tc_status = TOOL_STATUS_OK
             try:
                 observation = await self._registry.dispatch(
                     name=tool_name,
@@ -638,13 +604,14 @@ class AgentService:
                 )
             except BadRequestError as exc:
                 observation = f"Tool error: {exc.message}"
+                tc_status = TOOL_STATUS_ERROR
                 logger.warning(
                     "Agent native loop: tool %r raised BadRequestError: %s",
                     tool_name,
                     exc.message,
                 )
+            duration_ms = (time.perf_counter() - t0) * 1000
 
-            # Accumulate structured RAG results for citation
             tool_obj = None
             with contextlib.suppress(BadRequestError):
                 tool_obj = self._registry.get_tool(tool_name)
@@ -656,11 +623,12 @@ class AgentService:
                     tool_name=tool_name,
                     args=tc.args,
                     observation=observation,
+                    status=tc_status,
+                    duration_ms=duration_ms,
                 )
             )
             await self._save_state(state, status="in_progress")
 
-            # Append tool result to history so the provider can see it
             messages.append(
                 AgentMessage(
                     role="tool",
@@ -671,32 +639,51 @@ class AgentService:
                     ),
                 )
             )
-
         else:
             logger.warning(
                 "Agent native loop: reached max_tool_calls=%d without text response",
                 self._max_tool_calls,
             )
+            state.budget_exhausted = True
 
     # ------------------------------------------------------------------
-    # Private — Prompt-based tool-calling loop (Phase 8 fallback)
+    # Private - Prompt-based tool-calling loop (Phase 8 fallback, Phase 14)
     # ------------------------------------------------------------------
 
     async def _prompt_tool_loop(self, *, state: AgentState) -> None:
-        """Prompt-based tool-calling loop (Phase 8 fallback).
+        """Prompt-based tool-calling loop with Phase 14 improvements."""
+        if self._planner is not None:
+            try:
+                task_plan = await self._planner.plan(
+                    question=state.question,
+                    tool_schemas=self._registry.tool_schemas,
+                    has_memory=state.has_memory_hits,
+                    has_history=state.has_history,
+                )
+                state.plan = task_plan.steps
+                logger.debug(
+                    "AgentPlanner: steps=%r rationale=%r confidence=%.2f",
+                    task_plan.steps,
+                    task_plan.rationale,
+                    task_plan.confidence,
+                )
+            except Exception:
+                logger.warning(
+                    "AgentService: planner error; continuing without plan",
+                    exc_info=True,
+                )
 
-        Used when the LLM provider does **not** implement
-        :class:`~cortex.llm.base.SupportsToolCalling`.  Embeds tool schemas
-        in the system prompt and parses the LLM's JSON decisions.
-
-        Writes results into ``state.tool_calls`` and
-        ``state.retrieved_chunks`` in-place.
-        """
+        context_flags = {
+            "has_history": state.has_history,
+            "has_memory": state.has_memory_hits,
+        }
         current_prompt = self._agent_prompt_builder.build_initial(
             question=state.question,
             tool_schemas=self._registry.tool_schemas,
+            context_flags=context_flags,
         )
 
+        seen_calls: set[tuple[str, str]] = set()
         loop_count = 0
 
         while loop_count < self._max_tool_calls:
@@ -730,7 +717,39 @@ class AgentService:
             if action == "tool_call":
                 tool_name = str(decision.get("tool", "")).strip()
                 tool_args: dict = decision.get("args", {})
+                frozen = (tool_name, _freeze_args(tool_args))
 
+                if frozen in seen_calls:
+                    logger.info(
+                        "Agent prompt loop: skipping duplicate"
+                        " call to %r (iteration=%d)",
+                        tool_name,
+                        loop_count,
+                    )
+                    observation = _DUPLICATE_TOOL_MSG
+                    state.tool_calls.append(
+                        ToolCallRecord(
+                            tool_name=tool_name,
+                            args=tool_args,
+                            observation=observation,
+                            status=TOOL_STATUS_SKIPPED,
+                            duration_ms=0.0,
+                        )
+                    )
+                    await self._save_state(state, status="in_progress")
+                    current_prompt = self._agent_prompt_builder.build_observation_turn(
+                        previous_prompt=current_prompt,
+                        llm_decision=raw_response,
+                        tool_name=tool_name,
+                        observation=observation,
+                        max_observation_chars=_MAX_OBSERVATION_CHARS,
+                    )
+                    continue
+
+                seen_calls.add(frozen)
+
+                t0 = time.perf_counter()
+                tc_status = TOOL_STATUS_OK
                 try:
                     observation = await self._registry.dispatch(
                         name=tool_name,
@@ -739,7 +758,9 @@ class AgentService:
                     )
                 except BadRequestError as exc:
                     observation = f"Tool error: {exc.message}"
+                    tc_status = TOOL_STATUS_ERROR
                     tool_name = tool_name or "unknown"
+                duration_ms = (time.perf_counter() - t0) * 1000
 
                 tool_obj = None
                 with contextlib.suppress(BadRequestError):
@@ -752,6 +773,8 @@ class AgentService:
                         tool_name=tool_name,
                         args=tool_args,
                         observation=observation,
+                        status=tc_status,
+                        duration_ms=duration_ms,
                     )
                 )
                 await self._save_state(state, status="in_progress")
@@ -761,6 +784,7 @@ class AgentService:
                     llm_decision=raw_response,
                     tool_name=tool_name,
                     observation=observation,
+                    max_observation_chars=_MAX_OBSERVATION_CHARS,
                 )
             else:
                 logger.warning(
@@ -768,28 +792,27 @@ class AgentService:
                     action,
                 )
                 break
+        else:
+            logger.warning(
+                "Agent prompt loop: reached max_tool_calls=%d without final_answer",
+                self._max_tool_calls,
+            )
+            state.budget_exhausted = True
 
     # ------------------------------------------------------------------
-    # Private — Streaming tool-calling loops (Phase 11)
+    # Private - Streaming tool-calling loops (Phase 11, updated Phase 14)
     # ------------------------------------------------------------------
 
     async def _native_tool_loop_stream(
         self, *, state: AgentState
     ) -> AsyncGenerator[AgentEvent, None]:
-        """Native tool-calling loop that yields ToolCallEvent/ToolResultEvent.
-
-        Mirrors :meth:`_native_tool_loop` exactly but yields events before and
-        after each tool execution.  All state writes (tool_calls,
-        retrieved_chunks) are identical.
-        """
+        """Native streaming tool loop with Phase 14 deduplication and tracking."""
         from cortex.agent.events import ToolCallEvent, ToolResultEvent
         from cortex.llm.base import SupportsToolCalling
 
         assert isinstance(self._llm, SupportsToolCalling)
-
-        messages: list[AgentMessage] = [
-            AgentMessage(role="user", text=state.question)
-        ]
+        messages: list[AgentMessage] = [AgentMessage(role="user", text=state.question)]
+        seen_calls: set[tuple[str, str]] = set()
 
         for iteration in range(self._max_tool_calls):
             logger.debug(
@@ -820,12 +843,42 @@ class AgentService:
 
             tc: ToolCallRequest = result.tool_call  # type: ignore[assignment]
             tool_name = tc.tool_name
-
-            # Emit tool_call event (before execution)
-            yield ToolCallEvent(tool_name=tool_name, args=tc.args)
-
+            frozen = (tool_name, _freeze_args(tc.args))
             messages.append(AgentMessage(role="model", tool_call=tc))
 
+            if frozen in seen_calls:
+                logger.info(
+                    "Agent native stream loop: skipping duplicate call to %r",
+                    tool_name,
+                )
+                observation = _DUPLICATE_TOOL_MSG
+                state.tool_calls.append(
+                    ToolCallRecord(
+                        tool_name=tool_name,
+                        args=tc.args,
+                        observation=observation,
+                        status=TOOL_STATUS_SKIPPED,
+                        duration_ms=0.0,
+                    )
+                )
+                messages.append(
+                    AgentMessage(
+                        role="tool",
+                        tool_result=ToolResult(
+                            tool_name=tool_name,
+                            output=observation,
+                            call_id=tc.call_id,
+                        ),
+                    )
+                )
+                await self._save_state(state, status="in_progress")
+                continue
+
+            seen_calls.add(frozen)
+            yield ToolCallEvent(tool_name=tool_name, args=tc.args)
+
+            t0 = time.perf_counter()
+            tc_status = TOOL_STATUS_OK
             try:
                 observation = await self._registry.dispatch(
                     name=tool_name,
@@ -834,13 +887,14 @@ class AgentService:
                 )
             except BadRequestError as exc:
                 observation = f"Tool error: {exc.message}"
+                tc_status = TOOL_STATUS_ERROR
                 logger.warning(
                     "Agent native stream loop: tool %r raised BadRequestError: %s",
                     tool_name,
                     exc.message,
                 )
+            duration_ms = (time.perf_counter() - t0) * 1000
 
-            # Accumulate RAG results
             tool_obj = None
             with contextlib.suppress(BadRequestError):
                 tool_obj = self._registry.get_tool(tool_name)
@@ -852,12 +906,11 @@ class AgentService:
                     tool_name=tool_name,
                     args=tc.args,
                     observation=observation,
+                    status=tc_status,
+                    duration_ms=duration_ms,
                 )
             )
             await self._save_state(state, status="in_progress")
-
-            # Emit tool_result event (bounded preview)
-            yield ToolResultEvent.from_observation(tool_name, observation)
 
             messages.append(
                 AgentMessage(
@@ -869,28 +922,46 @@ class AgentService:
                     ),
                 )
             )
-
+            yield ToolResultEvent.from_observation(tool_name, observation)
         else:
             logger.warning(
                 "Agent native stream loop: reached max_tool_calls=%d",
                 self._max_tool_calls,
             )
+            state.budget_exhausted = True
 
     async def _prompt_tool_loop_stream(
         self, *, state: AgentState
     ) -> AsyncGenerator[AgentEvent, None]:
-        """Prompt-based tool-calling loop that yields ToolCallEvent/ToolResultEvent.
-
-        Mirrors :meth:`_prompt_tool_loop` exactly but yields events.
-        All state writes are identical.
-        """
+        """Prompt-based streaming tool loop with Phase 14 improvements."""
         from cortex.agent.events import ToolCallEvent, ToolResultEvent
 
+        if self._planner is not None:
+            try:
+                task_plan = await self._planner.plan(
+                    question=state.question,
+                    tool_schemas=self._registry.tool_schemas,
+                    has_memory=state.has_memory_hits,
+                    has_history=state.has_history,
+                )
+                state.plan = task_plan.steps
+            except Exception:
+                logger.warning(
+                    "AgentService stream: planner error; continuing without plan",
+                    exc_info=True,
+                )
+
+        context_flags = {
+            "has_history": state.has_history,
+            "has_memory": state.has_memory_hits,
+        }
         current_prompt = self._agent_prompt_builder.build_initial(
             question=state.question,
             tool_schemas=self._registry.tool_schemas,
+            context_flags=context_flags,
         )
 
+        seen_calls: set[tuple[str, str]] = set()
         loop_count = 0
 
         while loop_count < self._max_tool_calls:
@@ -924,10 +995,38 @@ class AgentService:
             if action == "tool_call":
                 tool_name = str(decision.get("tool", "")).strip()
                 tool_args: dict = decision.get("args", {})
+                frozen = (tool_name, _freeze_args(tool_args))
 
-                # Emit tool_call event
+                if frozen in seen_calls:
+                    logger.info(
+                        "Agent prompt stream loop: skipping duplicate call to %r",
+                        tool_name,
+                    )
+                    observation = _DUPLICATE_TOOL_MSG
+                    state.tool_calls.append(
+                        ToolCallRecord(
+                            tool_name=tool_name,
+                            args=tool_args,
+                            observation=observation,
+                            status=TOOL_STATUS_SKIPPED,
+                            duration_ms=0.0,
+                        )
+                    )
+                    await self._save_state(state, status="in_progress")
+                    current_prompt = self._agent_prompt_builder.build_observation_turn(
+                        previous_prompt=current_prompt,
+                        llm_decision=raw_response,
+                        tool_name=tool_name,
+                        observation=observation,
+                        max_observation_chars=_MAX_OBSERVATION_CHARS,
+                    )
+                    continue
+
+                seen_calls.add(frozen)
                 yield ToolCallEvent(tool_name=tool_name or "unknown", args=tool_args)
 
+                t0 = time.perf_counter()
+                tc_status = TOOL_STATUS_OK
                 try:
                     observation = await self._registry.dispatch(
                         name=tool_name,
@@ -936,7 +1035,9 @@ class AgentService:
                     )
                 except BadRequestError as exc:
                     observation = f"Tool error: {exc.message}"
+                    tc_status = TOOL_STATUS_ERROR
                     tool_name = tool_name or "unknown"
+                duration_ms = (time.perf_counter() - t0) * 1000
 
                 tool_obj = None
                 with contextlib.suppress(BadRequestError):
@@ -949,11 +1050,11 @@ class AgentService:
                         tool_name=tool_name,
                         args=tool_args,
                         observation=observation,
+                        status=tc_status,
+                        duration_ms=duration_ms,
                     )
                 )
                 await self._save_state(state, status="in_progress")
-
-                # Emit tool_result event
                 yield ToolResultEvent.from_observation(tool_name, observation)
 
                 current_prompt = self._agent_prompt_builder.build_observation_turn(
@@ -961,6 +1062,7 @@ class AgentService:
                     llm_decision=raw_response,
                     tool_name=tool_name,
                     observation=observation,
+                    max_observation_chars=_MAX_OBSERVATION_CHARS,
                 )
             else:
                 logger.warning(
@@ -968,6 +1070,12 @@ class AgentService:
                     action,
                 )
                 break
+        else:
+            logger.warning(
+                "Agent prompt stream loop: reached max_tool_calls=%d",
+                self._max_tool_calls,
+            )
+            state.budget_exhausted = True
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -975,22 +1083,14 @@ class AgentService:
 
     @staticmethod
     def _parse_decision(raw: str) -> dict:
-        """Extract a JSON decision dict from the LLM's raw text response.
-
-        Strips markdown code fences if present.  Falls back to an empty
-        dict on parse failure so the loop can exit gracefully.
-        """
+        """Extract a JSON decision dict from the LLM's raw text response."""
         text = raw.strip()
-
-        # Strip markdown code fences (```json ... ``` or ``` ... ```)
         if text.startswith("```"):
             lines = text.splitlines()
-            # Drop first (```json or ```) and last (```) lines
             inner_lines = (
                 lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
             )
             text = "\n".join(inner_lines).strip()
-
         try:
             decision = json.loads(text)
             if not isinstance(decision, dict):
@@ -1002,7 +1102,6 @@ class AgentService:
                 exc,
                 raw[:300],
             )
-            # Return a synthetic final-answer so the loop exits cleanly
             return {"action": "final_answer", "answer": raw.strip()}
 
     # ------------------------------------------------------------------
@@ -1015,11 +1114,7 @@ class AgentService:
         conversation_id: str | None,
         run_id: str,
     ) -> str:
-        """Construct namespaced Redis key for an agent run.
-
-        Format: cortex:agent:run:{user_id}:{conversation_id}:{run_id}
-        Stateless runs use '_stateless' for conversation_id.
-        """
+        """Construct namespaced Redis key for an agent run."""
         conv = conversation_id or "_stateless"
         return f"cortex:agent:run:{user_id}:{conv}:{run_id}"
 
@@ -1032,8 +1127,8 @@ class AgentService:
     ) -> dict[str, Any]:
         """Serialise AgentState to an ephemeral, JSON-safe dictionary.
 
-        Excludes non-serialisable objects (User, raw Message rows) and large
-        raw text chunks (stores chunk IDs only).
+        Phase 14: includes plan, budget_exhausted, and per-tool
+        status/duration_ms for richer state inspection.
         """
         return {
             "run_id": state.run_id,
@@ -1041,11 +1136,15 @@ class AgentService:
             "conversation_id": state.conversation_id,
             "question": state.question,
             "started_at_iso": getattr(state, "started_at_iso", ""),
+            "plan": state.plan,
+            "budget_exhausted": state.budget_exhausted,
             "tool_calls": [
                 {
                     "tool_name": tc.tool_name,
                     "args": tc.args,
                     "observation": tc.observation,
+                    "status": tc.status,
+                    "duration_ms": tc.duration_ms,
                 }
                 for tc in state.tool_calls
             ],
@@ -1105,9 +1204,9 @@ class AgentService:
         conversation_id: str | None,
         run_id: str,
     ) -> dict[str, Any] | None:
-        """Load an ephemeral agent state snapshot from the state store, if available.
+        """Load an ephemeral agent state snapshot from the state store.
 
-        Returns None if no state store is configured or the key is not found / expired.
+        Returns None if no state store is configured or the key is not found.
         """
         if self._state_store is None:
             return None

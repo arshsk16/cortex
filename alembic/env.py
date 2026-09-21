@@ -10,11 +10,10 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from cortex.core.config import get_settings
-from cortex.db.base import Base
-
 # Import the models package so every mapped table is registered on Base.metadata.
 import cortex.db.models  # noqa: F401
+from cortex.core.config import get_settings
+from cortex.db.base import Base
 
 config = context.config
 
