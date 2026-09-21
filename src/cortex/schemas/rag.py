@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+import re
+
+from pydantic import BaseModel, Field, field_validator
+
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _sanitise_text(value: str) -> str:
+    """Strip null bytes and control characters from user-supplied text."""
+    return _CONTROL_CHAR_RE.sub("", value)
 
 
 class RAGQueryRequest(BaseModel):
@@ -27,6 +36,14 @@ class RAGQueryRequest(BaseModel):
         le=20,
         description="Number of document chunks to retrieve as context",
     )
+
+    @field_validator("question", mode="before")
+    @classmethod
+    def sanitise_question(cls, value: object) -> object:
+        """Strip control characters from the question before length validation."""
+        if isinstance(value, str):
+            return _sanitise_text(value)
+        return value
 
 
 class CitationResponse(BaseModel):

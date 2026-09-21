@@ -215,6 +215,36 @@ class Settings(BaseSettings):
         ),
     )
 
+    # LLM request timeout
+    gemini_request_timeout_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=300,
+        description=(
+            "Maximum seconds to wait for a Gemini API response before "
+            "raising ServiceUnavailableError. Applies to generate(), "
+            "generate_stream(), and generate_with_tools()."
+        ),
+    )
+
+    # Rate limiting (in-process sliding window, single-node)
+    rate_limit_requests_per_minute: int = Field(
+        default=60,
+        ge=1,
+        description=(
+            "Global per-IP request rate limit (requests per minute). "
+            "Applies to all routes except those covered by the auth limit."
+        ),
+    )
+    rate_limit_auth_requests_per_minute: int = Field(
+        default=10,
+        ge=1,
+        description=(
+            "Stricter per-IP rate limit for authentication routes "
+            "(/register, /login) to mitigate brute-force attacks."
+        ),
+    )
+
     @field_validator("database_url")
     @classmethod
     def validate_database_url(cls, value: str) -> str:

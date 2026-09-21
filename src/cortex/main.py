@@ -14,6 +14,8 @@ from cortex.api.router import api_router
 from cortex.core.config import Settings, get_settings
 from cortex.core.exceptions import register_exception_handlers
 from cortex.core.logging import configure_logging
+from cortex.core.middleware import RequestIDMiddleware
+from cortex.core.rate_limit import RateLimitMiddleware
 from cortex.db.session import Database
 from cortex.embeddings.factory import create_embedding_provider
 from cortex.llm.factory import create_llm_provider
@@ -125,6 +127,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_credentials=resolved.cors_allow_credentials,
         allow_methods=resolved.cors_allow_methods,
         allow_headers=resolved.cors_allow_headers,
+    )
+
+    # Request-ID middleware — must be added before rate limiting so the ID is
+    # available in rate-limit log warnings.
+    application.add_middleware(RequestIDMiddleware)
+
+    # Auth-scoped tighter rate limit (brute-force protection on login/register).
+    auth_prefix = f"{resolved.api_v1_prefix}/auth"
+    application.add_middleware(
+        RateLimitMiddleware,
+        requests_per_minute=resolved.rate_limit_auth_requests_per_minute,
+        path_prefix=auth_prefix,
+    )
+
+    # Global rate limit for all remaining routes.
+    application.add_middleware(
+        RateLimitMiddleware,
+        requests_per_minute=resolved.rate_limit_requests_per_minute,
     )
 
     register_exception_handlers(application)

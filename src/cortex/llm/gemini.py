@@ -44,6 +44,7 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
         self._model_name = settings.gemini_model_name
         self._temperature = settings.gemini_temperature
         self._max_output_tokens = settings.gemini_max_output_tokens
+        self._timeout = settings.gemini_request_timeout_seconds
         self._client: object | None = None  # lazy-init
 
     # ------------------------------------------------------------------
@@ -88,13 +89,26 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
     async def generate(self, prompt: str) -> str:
         """Return the full Gemini completion for ``prompt``."""
         try:
-            text = await asyncio.to_thread(self._generate_sync, prompt)
+            text = await asyncio.wait_for(
+                asyncio.to_thread(self._generate_sync, prompt),
+                timeout=self._timeout,
+            )
             logger.debug(
                 "Gemini generation complete (model=%s, chars=%d)",
                 self._model_name,
                 len(text),
             )
             return text
+        except TimeoutError as exc:
+            logger.error(
+                "Gemini generation timed out after %ds (model=%s)",
+                self._timeout,
+                self._model_name,
+            )
+            raise ServiceUnavailableError(
+                "LLM request timed out",
+                details={"model": self._model_name, "timeout_s": self._timeout},
+            ) from exc
         except ServiceUnavailableError:
             raise
         except Exception as exc:
@@ -124,9 +138,25 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
                             chunks.append(chunk.text)
                     return chunks
 
-                parts = await asyncio.to_thread(_iter_sync)
+                parts = await asyncio.wait_for(
+                    asyncio.to_thread(_iter_sync),
+                    timeout=self._timeout,
+                )
                 for part in parts:
                     yield part
+            except TimeoutError as exc:
+                logger.error(
+                    "Gemini streaming timed out after %ds (model=%s)",
+                    self._timeout,
+                    self._model_name,
+                )
+                raise ServiceUnavailableError(
+                    "LLM request timed out",
+                    details={
+                        "model": self._model_name,
+                        "timeout_s": self._timeout,
+                    },
+                ) from exc
             except ServiceUnavailableError:
                 raise
             except Exception as exc:
@@ -173,10 +203,23 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
             plain-text answer.
         """
         try:
-            result = await asyncio.to_thread(
-                self._generate_with_tools_sync, messages, tool_schemas
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._generate_with_tools_sync, messages, tool_schemas
+                ),
+                timeout=self._timeout,
             )
             return result
+        except TimeoutError as exc:
+            logger.error(
+                "Gemini generate_with_tools timed out after %ds (model=%s)",
+                self._timeout,
+                self._model_name,
+            )
+            raise ServiceUnavailableError(
+                "LLM request timed out",
+                details={"model": self._model_name, "timeout_s": self._timeout},
+            ) from exc
         except ServiceUnavailableError:
             raise
         except Exception as exc:

@@ -17,6 +17,19 @@ from cortex.services.user import UserService
 logger = logging.getLogger(__name__)
 
 
+def _redact_email(email: str) -> str:
+    """Return a partially redacted email address for safe logging.
+
+    Example: ``alice@example.com`` → ``a***@example.com``.
+    Preserves domain for routing/debugging without exposing the full address.
+    """
+    if "@" not in email:
+        return "***"
+    local, domain = email.rsplit("@", 1)
+    visible = local[:1] if local else ""
+    return f"{visible}***@{domain}"
+
+
 class AuthService:
     """Coordinates authentication flows using UserService and JWT helpers."""
 
@@ -42,7 +55,11 @@ class AuthService:
                 is_verified=False,
             )
         )
-        logger.info("Registered user id=%s email=%s", user.id, user.email)
+        logger.info(
+            "Registered user id=%s email=%s",
+            user.id,
+            _redact_email(str(user.email)),
+        )
         return self._build_auth_response(user)
 
     async def login(self, payload: UserLoginRequest) -> AuthResponse:
@@ -54,7 +71,11 @@ class AuthService:
         if not user.is_active:
             raise ForbiddenError("User account is inactive")
 
-        logger.info("User logged in id=%s email=%s", user.id, user.email)
+        logger.info(
+            "User logged in id=%s email=%s",
+            user.id,
+            _redact_email(str(user.email)),
+        )
         return self._build_auth_response(user)
 
     def _build_auth_response(self, user: User) -> AuthResponse:

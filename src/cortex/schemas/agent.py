@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# Pattern matching ASCII control characters except tab (\x09) and newline
+# (\x0a / \x0d), which are legitimate in multiline questions.
+_CONTROL_CHAR_RE = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
+)
+
+
+def _sanitise_text(value: str) -> str:
+    """Strip null bytes and control characters from user-supplied text."""
+    return _CONTROL_CHAR_RE.sub("", value)
 
 
 class AgentRunRequest(BaseModel):
@@ -23,6 +35,14 @@ class AgentRunRequest(BaseModel):
             "ownership and persists the message pair."
         ),
     )
+
+    @field_validator("message", mode="before")
+    @classmethod
+    def sanitise_message(cls, value: object) -> object:
+        """Strip control characters from the message before length validation."""
+        if isinstance(value, str):
+            return _sanitise_text(value)
+        return value
 
 
 class AgentToolCallRead(BaseModel):

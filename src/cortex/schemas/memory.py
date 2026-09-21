@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _sanitise_text(value: str) -> str:
+    """Strip null bytes and control characters from user-supplied text."""
+    return _CONTROL_CHAR_RE.sub("", value)
 
 
 class MemoryCreate(BaseModel):
@@ -19,6 +27,13 @@ class MemoryCreate(BaseModel):
         description="Optional caller-supplied metadata (tags, source, etc.)",
     )
 
+    @field_validator("content", mode="before")
+    @classmethod
+    def sanitise_content(cls, value: object) -> object:
+        if isinstance(value, str):
+            return _sanitise_text(value)
+        return value
+
 
 
 class MemoryUpdate(BaseModel):
@@ -27,6 +42,13 @@ class MemoryUpdate(BaseModel):
     content: str = Field(
         ..., min_length=1, max_length=10_000, description="Updated memory text content"
     )
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def sanitise_content(cls, value: object) -> object:
+        if isinstance(value, str):
+            return _sanitise_text(value)
+        return value
 
 class MemoryRead(BaseModel):
     """Public memory record returned by the API."""
@@ -63,11 +85,18 @@ class MemorySearchRequest(BaseModel):
         ...,
         min_length=1,
         max_length=2_000,
-        description="Query text for semantic search"
+        description="Query text for semantic search",
     )
     limit: int = Field(
         default=5, ge=1, le=50, description="Maximum number of results to return"
     )
+
+    @field_validator("query", mode="before")
+    @classmethod
+    def sanitise_query(cls, value: object) -> object:
+        if isinstance(value, str):
+            return _sanitise_text(value)
+        return value
 
 
 class MemorySearchResult(BaseModel):
