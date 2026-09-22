@@ -1,0 +1,22 @@
+# =============================================================================
+# docker-compose.override.yml — developer convenience overrides
+# =============================================================================
+# Automatically merged with docker-compose.yml by Docker Compose when present.
+# Enables live-reload, relaxed security settings, and exposes extra ports.
+# DO NOT commit secrets to this file.
+# =============================================================================
+
+services:
+
+  cortex:
+    environment:
+      APP_ENV:   "development"
+      DEBUG:     "true"
+      LOG_JSON:  "false"
+      LOG_LEVEL: "DEBUG"
+      # Disable JSON logs for readable terminal output in dev
+    # Expose docs and reload for development
+    command: []
+    # Override with hot-reload (single worker)
+    environment:
+      WORKERS: "1"

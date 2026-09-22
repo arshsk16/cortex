@@ -1,0 +1,146 @@
+# =============================================================================
+# docker-compose.yml — Cortex production stack
+# =============================================================================
+# Services:
+#   db      — PostgreSQL 16 (persistent volume)
+#   redis   — Redis 7 (persistent volume, optional)
+#   cortex  — Cortex API (depends on db + redis)
+#
+# Usage:
+#   cp .env.docker .env.docker.local   # fill in secrets
+#   docker compose --env-file .env.docker.local up -d
+#
+# All secrets / tunables are read from the env-file so nothing sensitive
+# is hard-coded in this file.
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     "${POSTGRES_USER:-cortex}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+      POSTGRES_DB:       "${POSTGRES_DB:-cortex}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cortex} -d ${POSTGRES_DB:-cortex}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - cortex_net
+
+  # ---------------------------------------------------------------------------
+  # Redis 7
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass "${REDIS_PASSWORD:-}"
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - cortex_net
+
+  # ---------------------------------------------------------------------------
+  # Cortex API
+  # ---------------------------------------------------------------------------
+  cortex:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Application
+      APP_ENV:   "${APP_ENV:-production}"
+      APP_NAME:  "${APP_NAME:-Cortex}"
+      DEBUG:     "false"
+      LOG_JSON:  "true"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+
+      # Database — asyncpg URL built from individual Compose env vars
+      DATABASE_URL: >-
+        postgresql+asyncpg://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD:?}@db:5432/${POSTGRES_DB:-cortex}
+
+      # Redis
+      REDIS_URL: "redis://:${REDIS_PASSWORD:-}@redis:6379/0"
+
+      # JWT (required — must be set in env-file)
+      JWT_SECRET_KEY: "${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}"
+
+      # CORS — comma-separated allowed origins
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:3000}"
+
+      # Gemini LLM
+      GEMINI_API_KEY:   "${GEMINI_API_KEY:-}"
+      GEMINI_MODEL_NAME: "${GEMINI_MODEL_NAME:-gemini-2.0-flash}"
+
+      # Storage paths inside the container (matched to volume mount points)
+      DOCUMENT_STORAGE_PATH: /app/storage/documents
+      CHROMA_PERSIST_DIRECTORY: /app/storage/chroma
+      CHROMA_COLLECTION_NAME: "${CHROMA_COLLECTION_NAME:-document_chunks}"
+      CHROMA_MEMORY_COLLECTION_NAME: "${CHROMA_MEMORY_COLLECTION_NAME:-memories}"
+
+      # Uvicorn workers
+      WORKERS: "${WORKERS:-2}"
+
+      # Rate limiting
+      RATE_LIMIT_REQUESTS_PER_MINUTE: "${RATE_LIMIT_REQUESTS_PER_MINUTE:-60}"
+      RATE_LIMIT_AUTH_REQUESTS_PER_MINUTE: "${RATE_LIMIT_AUTH_REQUESTS_PER_MINUTE:-10}"
+
+    volumes:
+      - cortex_documents:/app/storage/documents
+      - cortex_chroma:/app/storage/chroma
+    ports:
+      - "${CORTEX_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health/live || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - cortex_net
+
+# =============================================================================
+# Named volumes (persist across container restarts)
+# =============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  cortex_documents:
+    driver: local
+  cortex_chroma:
+    driver: local
+
+# =============================================================================
+# Network
+# =============================================================================
+networks:
+  cortex_net:
+    driver: bridge

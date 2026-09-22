@@ -1,0 +1,50 @@
+# =============================================================================
+# .dockerignore — files excluded from the Docker build context
+# =============================================================================
+
+# Virtual environment (rebuilt inside the image by uv)
+.venv/
+venv/
+
+# Test artefacts
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type-checking caches
+.mypy_cache/
+.ruff_cache/
+
+# Local secrets and environment files
+.env
+.env.local
+.env.*.local
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Git history
+.git/
+.gitignore
+
+# Local data volumes (mounted at runtime, not baked into the image)
+storage/
+
+# Build output
+dist/
+build/
+*.egg-info/
+
+# Docs (not needed at runtime)
+docs/
+*.md
+
+# Dev-only zip artefacts
+cortex.zip
