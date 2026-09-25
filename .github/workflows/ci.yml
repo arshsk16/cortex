@@ -128,6 +128,12 @@ jobs:
           file: Dockerfile
           target: runtime
           push: false
+          # load: true exports the finished image into the local Docker daemon
+          # image store so the subsequent smoke-test step can run it with
+          # 'docker run'. Without this the docker-container buildx driver
+          # only stores the result in the GHA layer cache and never loads
+          # it locally.
+          load: true
           tags: cortex:ci-${{ github.sha }}
           # Use GitHub Actions cache for faster repeated builds
           cache-from: type=gha
