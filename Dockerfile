@@ -30,7 +30,7 @@ ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1
 
 # Copy dependency manifests first to maximise layer cache.
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock README.md ./
 
 # Install all production dependencies into .venv (skip the project itself).
 # --no-dev is omitted: dev packages are optional extras (extra == 'dev'),
