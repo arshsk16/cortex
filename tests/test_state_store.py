@@ -531,7 +531,11 @@ class TestAgentServiceStateStoreLifecycle:
 
 class TestRedisSettings:
     def test_default_redis_settings(self) -> None:
-        s = Settings()
+        # Pass redis_url='' explicitly so the test is independent of the
+        # REDIS_URL environment variable (which CI sets to a real Redis URL).
+        # The intent is to verify that an empty URL is accepted and that the
+        # default TTL is correct -- not to assert the class-level env default.
+        s = Settings(redis_url="")
         assert s.redis_url == ""
         assert s.agent_state_ttl_seconds == 1800
 
