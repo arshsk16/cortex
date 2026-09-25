@@ -45,6 +45,7 @@ build/
 # Docs (not needed at runtime)
 docs/
 *.md
+!README.md
 
 # Dev-only zip artefacts
 cortex.zip
