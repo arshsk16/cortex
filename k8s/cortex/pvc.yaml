@@ -1,0 +1,29 @@
+# Persistent storage for Cortex document uploads and ChromaDB index
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cortex-documents-pvc
+  namespace: cortex
+  labels:
+    app.kubernetes.io/name: cortex
+    app.kubernetes.io/component: storage
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cortex-chroma-pvc
+  namespace: cortex
+  labels:
+    app.kubernetes.io/name: cortex
+    app.kubernetes.io/component: storage
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi

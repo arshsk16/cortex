@@ -1,0 +1,38 @@
+# NGINX Ingress — route external traffic to the Cortex service.
+# Requires the NGINX Ingress Controller:
+#   kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.0/deploy/static/provider/cloud/deploy.yaml
+#
+# Replace host with your actual domain.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cortex-ingress
+  namespace: cortex
+  labels:
+    app.kubernetes.io/name: cortex
+    app.kubernetes.io/component: ingress
+    app.kubernetes.io/part-of: cortex
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-body-size: "32m"
+    # Uncomment to enable TLS via cert-manager:
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: cortex.example.com       # CHANGE: replace with your domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cortex-svc
+                port:
+                  name: http
+  # Uncomment to enable TLS:
+  # tls:
+  #   - hosts:
+  #       - cortex.example.com
+  #     secretName: cortex-tls-secret

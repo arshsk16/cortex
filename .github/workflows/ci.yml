@@ -1,0 +1,141 @@
+# =============================================================================
+# Cortex CI pipeline — GitHub Actions
+# =============================================================================
+# Triggers: push and PR to main.
+# Jobs:
+#   lint     — ruff check
+#   test     — pytest (with service containers for PostgreSQL + Redis)
+#   docker   — build and verify the production Docker image
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel redundant runs on the same branch/PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Lint
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Ruff lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.7.19"
+          python-version: "3.12"
+
+      - name: Install dev dependencies
+        run: uv sync --frozen --dev
+
+      - name: Run Ruff
+        run: uv run ruff check .
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Tests (pytest with live PostgreSQL + Redis)
+  # ---------------------------------------------------------------------------
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    # Service containers are accessible at localhost within the job
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cortex
+          POSTGRES_PASSWORD: cortex_test
+          POSTGRES_DB: cortex_test
+        options: >-
+          --health-cmd "pg_isready -U cortex -d cortex_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://cortex:cortex_test@localhost:5432/cortex_test
+      JWT_SECRET_KEY: "ci-test-secret-key-that-is-at-least-32-chars-long"
+      REDIS_URL: redis://localhost:6379/0
+      APP_ENV: testing
+      LOG_JSON: "false"
+      LOG_LEVEL: DEBUG
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.7.19"
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --dev
+
+      - name: Run Alembic migrations
+        run: uv run alembic upgrade head
+
+      - name: Run pytest
+        run: uv run pytest -q --tb=short
+
+      - name: Upload test results (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results
+          path: .pytest_cache/
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Docker build verification
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push — verification only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: runtime
+          push: false
+          tags: cortex:ci-${{ github.sha }}
+          # Use GitHub Actions cache for faster repeated builds
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Fail the job if the build takes more than 20 minutes
+          timeout-minutes: 20
+
+      - name: Smoke-test the image
+        run: |
+          docker run --rm \
+            -e DATABASE_URL="postgresql+asyncpg://u:p@localhost/db" \
+            -e JWT_SECRET_KEY="smoke-test-jwt-secret-that-is-32-chars-" \
+            cortex:ci-${{ github.sha }} \
+            python -c "from cortex.main import create_app; app = create_app(); print('OK')"

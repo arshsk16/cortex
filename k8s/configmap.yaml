@@ -1,0 +1,45 @@
+# Non-sensitive application configuration.
+# Sensitive values (passwords, API keys) live in k8s/secret.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cortex-config
+  namespace: cortex
+  labels:
+    app.kubernetes.io/name: cortex
+    app.kubernetes.io/component: config
+data:
+  APP_ENV: "production"
+  APP_NAME: "Cortex"
+  DEBUG: "false"
+  LOG_JSON: "true"
+  LOG_LEVEL: "INFO"
+  HOST: "0.0.0.0"
+  PORT: "8000"
+  WORKERS: "2"
+
+  # Database (host/port/name — credentials come from Secret)
+  POSTGRES_HOST: "postgres-svc"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "cortex"
+
+  # Redis (host/port — password comes from Secret)
+  REDIS_HOST: "redis-svc"
+  REDIS_PORT: "6379"
+
+  # Gemini
+  GEMINI_MODEL_NAME: "gemini-2.0-flash"
+  GEMINI_REQUEST_TIMEOUT_SECONDS: "30"
+
+  # Storage paths (matched to PVC mount points)
+  DOCUMENT_STORAGE_PATH: "/app/storage/documents"
+  CHROMA_PERSIST_DIRECTORY: "/app/storage/chroma"
+  CHROMA_COLLECTION_NAME: "document_chunks"
+  CHROMA_MEMORY_COLLECTION_NAME: "memories"
+
+  # CORS (override per environment)
+  CORS_ORIGINS: "http://localhost:3000"
+
+  # Rate limiting
+  RATE_LIMIT_REQUESTS_PER_MINUTE: "60"
+  RATE_LIMIT_AUTH_REQUESTS_PER_MINUTE: "10"

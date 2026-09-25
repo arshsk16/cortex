@@ -1,0 +1,17 @@
+# ClusterIP service for Cortex API (exposed via Ingress)
+apiVersion: v1
+kind: Service
+metadata:
+  name: cortex-svc
+  namespace: cortex
+  labels:
+    app.kubernetes.io/name: cortex
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: cortex
+spec:
+  selector:
+    app: cortex
+  ports:
+    - port: 80
+      targetPort: 8000
+      name: http

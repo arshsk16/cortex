@@ -1,0 +1,18 @@
+# Headless-compatible ClusterIP service for PostgreSQL
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-svc
+  namespace: cortex
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: cortex
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+  clusterIP: None          # headless — required for StatefulSet DNS

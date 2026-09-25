@@ -62,3 +62,7 @@ cortex.zip
 
 # Docker deployment secrets
 .env.docker.local
+
+# Kubernetes secrets with real values (never commit)
+k8s/secret.yaml.local
+.github/workflows/*.local.yml

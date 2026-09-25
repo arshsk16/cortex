@@ -1,0 +1,121 @@
+# Cortex API Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cortex
+  namespace: cortex
+  labels:
+    app.kubernetes.io/name: cortex
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: cortex
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cortex
+  # Rolling update with zero downtime
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: cortex
+        app.kubernetes.io/name: cortex
+        app.kubernetes.io/component: api
+    spec:
+      # Graceful termination: let uvicorn finish in-flight requests
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      containers:
+        - name: cortex
+          image: cortex:latest           # replaced by CI with the digest-pinned image
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          # ----------------------------------------------------------------
+          # Environment — non-sensitive values from ConfigMap
+          # ----------------------------------------------------------------
+          envFrom:
+            - configMapRef:
+                name: cortex-config
+          # ----------------------------------------------------------------
+          # Environment — sensitive values from Secret
+          # ----------------------------------------------------------------
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cortex-secrets
+                  key: POSTGRES_PASSWORD
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cortex-secrets
+                  key: REDIS_PASSWORD
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cortex-secrets
+                  key: JWT_SECRET_KEY
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cortex-secrets
+                  key: GEMINI_API_KEY
+            # Build DATABASE_URL from parts (avoids storing full URL with password in ConfigMap)
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://cortex:$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)"
+            - name: REDIS_URL
+              value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/0"
+          # ----------------------------------------------------------------
+          # Resource requests & limits
+          # ----------------------------------------------------------------
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          # ----------------------------------------------------------------
+          # Health probes using Phase 15 endpoints
+          # ----------------------------------------------------------------
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8000
+            initialDelaySeconds: 60      # allow migrations to finish
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # ----------------------------------------------------------------
+          # Volume mounts
+          # ----------------------------------------------------------------
+          volumeMounts:
+            - name: documents
+              mountPath: /app/storage/documents
+            - name: chroma
+              mountPath: /app/storage/chroma
+      volumes:
+        - name: documents
+          persistentVolumeClaim:
+            claimName: cortex-documents-pvc
+        - name: chroma
+          persistentVolumeClaim:
+            claimName: cortex-chroma-pvc
