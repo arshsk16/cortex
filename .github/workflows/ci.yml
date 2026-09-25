@@ -140,9 +140,14 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Smoke-test the image
+        # --entrypoint python bypasses /app/entrypoint.sh (which blocks on
+        # PostgreSQL). The docker job has no DB service — full runtime startup
+        # is tested by the integration test job. This step only verifies that
+        # the image was built correctly and the Python app can be imported.
         run: |
           docker run --rm \
+            --entrypoint python \
             -e DATABASE_URL="postgresql+asyncpg://u:p@localhost/db" \
             -e JWT_SECRET_KEY="smoke-test-jwt-secret-that-is-32-chars-" \
             cortex:ci-${{ github.sha }} \
-            python -c "from cortex.main import create_app; app = create_app(); print('OK')"
+            -c "from cortex.main import create_app; app = create_app(); print('OK')"
