@@ -36,7 +36,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dev dependencies
-        run: uv sync --frozen --dev
+        run: uv sync --frozen --extra dev
 
       - name: Run Ruff
         run: uv run ruff check .
@@ -77,7 +77,7 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://cortex:cortex_test@localhost:5432/cortex_test
       JWT_SECRET_KEY: "ci-test-secret-key-that-is-at-least-32-chars-long"
       REDIS_URL: redis://localhost:6379/0
-      APP_ENV: testing
+      APP_ENV: development
       LOG_JSON: "false"
       LOG_LEVEL: DEBUG
 
@@ -90,7 +90,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --frozen --dev
+        run: uv sync --frozen --extra dev
 
       - name: Run Alembic migrations
         run: uv run alembic upgrade head
