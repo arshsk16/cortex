@@ -18,15 +18,28 @@ COPY --from=ghcr.io/astral-sh/uv:0.7.19 /uv /usr/local/bin/uv
 
 WORKDIR /build
 
+# uv environment variables required for correct Docker operation:
+#   UV_LINK_MODE=copy   — use file copy instead of hardlinks (hardlinks fail
+#                         across Docker filesystem layers)
+#   UV_PYTHON_DOWNLOADS=never — use the system Python from the base image;
+#                         do NOT attempt to download a managed Python
+#   UV_COMPILE_BYTECODE=1 — pre-compile .pyc files at build time so the
+#                         runtime image starts faster
+ENV UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_COMPILE_BYTECODE=1
+
 # Copy dependency manifests first to maximise layer cache.
 COPY pyproject.toml uv.lock ./
 
 # Install all production dependencies into .venv (skip the project itself).
-RUN uv sync --frozen --no-install-project --no-dev
+# --no-dev is omitted: dev packages are optional extras (extra == 'dev'),
+# not a uv dev group, so they are already excluded from the default sync.
+RUN uv sync --frozen --no-install-project
 
-# Copy source and install the project.
+# Copy source and install the project itself.
 COPY src/ ./src/
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen
 
 
 # ---------------------------------------------------------------------------
