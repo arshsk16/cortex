@@ -86,26 +86,26 @@ class TestRateLimitMiddleware:
             assert r.status_code == 200
 
     def test_per_ip_isolation(self) -> None:
-        """Different IPs get independent buckets."""
+        """Different IPs are rate-limited independently."""
+        from starlette.applications import Starlette
+
         from cortex.core.rate_limit import RateLimitMiddleware
 
-        app = FastAPI()
-        app.add_middleware(RateLimitMiddleware, requests_per_minute=2)
+        app = Starlette()
+        mw = RateLimitMiddleware(app, requests_per_minute=2)
 
-        @app.get("/check")
-        async def check() -> dict[str, str]:
-            return {"ok": "true"}
+        # Use _is_limited directly to verify per-IP independence
+        # Exhaust IP 1's bucket
+        mw._is_limited("1.1.1.1")
+        mw._is_limited("1.1.1.1")
+        limited_ip1, _ = mw._is_limited("1.1.1.1")
+        # IP 1 is now limited
+        assert limited_ip1
 
-        client = TestClient(app, raise_server_exceptions=False)
-        # Exhaust the budget for IP 1.1.1.1
-        for _ in range(2):
-            client.get("/check", headers={"X-Forwarded-For": "1.1.1.1"})
-        r_ip1 = client.get("/check", headers={"X-Forwarded-For": "1.1.1.1"})
-        assert r_ip1.status_code == 429
+        # IP 2 still has a fresh bucket
+        limited_ip2, _ = mw._is_limited("2.2.2.2")
+        assert not limited_ip2
 
-        # IP 2.2.2.2 has its own independent bucket -- should pass.
-        r_ip2 = client.get("/check", headers={"X-Forwarded-For": "2.2.2.2"})
-        assert r_ip2.status_code == 200
 
     def test_no_prefix_applies_globally(self) -> None:
         """Without path_prefix every route shares the same budget."""

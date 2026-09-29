@@ -48,12 +48,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.memory_vector_store = MemoryVectorStore(_memory_collection)
 
-    # Redis state store — optional; gracefully falls back to NullStateStore
+    # Redis state store and token blocklist — optional; gracefully falls back
+    # to NullStateStore / no-op blocklist when Redis is unavailable.
     redis_client = None
+    app.state.token_blocklist = None  # None = no revocation (Redis unavailable)
     if settings.redis_url:
         try:
             from redis.asyncio import Redis
 
+            from cortex.core.token_blocklist import TokenBlocklist
             from cortex.state_store.redis_store import RedisStateStore
 
             redis_client = Redis.from_url(
@@ -63,6 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 socket_timeout=2,
             )
             app.state.state_store = RedisStateStore(redis_client)
+            app.state.token_blocklist = TokenBlocklist(redis_client)
             logger.info("StateStore: Redis connected at %s", settings.redis_url)
         except Exception:
             logger.warning(
@@ -106,6 +110,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or get_settings()
     configure_logging(resolved)
 
+    # Disable interactive docs in production to reduce the attack surface.
+    _docs_url: str | None = None if resolved.is_production else "/docs"
+    _redoc_url: str | None = None if resolved.is_production else "/redoc"
+    _openapi_url: str | None = None if resolved.is_production else "/openapi.json"
+
     application = FastAPI(
         title=resolved.app_name,
         version=resolved.app_version or __version__,
@@ -113,9 +122,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Cortex is an enterprise-grade AI platform. "
             "This API exposes health, management, and (future) AI capabilities."
         ),
-        docs_url="/docs",
-        redoc_url="/redoc",
-        openapi_url="/openapi.json",
+        docs_url=_docs_url,
+        redoc_url=_redoc_url,
+        openapi_url=_openapi_url,
         lifespan=lifespan,
         debug=resolved.debug,
     )
@@ -139,12 +148,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         RateLimitMiddleware,
         requests_per_minute=resolved.rate_limit_auth_requests_per_minute,
         path_prefix=auth_prefix,
+        trusted_proxies=resolved.rate_limit_trusted_proxies,
     )
 
     # Global rate limit for all remaining routes.
     application.add_middleware(
         RateLimitMiddleware,
         requests_per_minute=resolved.rate_limit_requests_per_minute,
+        trusted_proxies=resolved.rate_limit_trusted_proxies,
     )
 
     register_exception_handlers(application)
@@ -182,5 +193,3 @@ app = create_app()
 
 if __name__ == "__main__":
     run()
-
-

@@ -244,6 +244,19 @@ class Settings(BaseSettings):
             "(/register, /login) to mitigate brute-force attacks."
         ),
     )
+    # Trusted reverse-proxy CIDRs for X-Forwarded-For handling.
+    # Only requests whose direct client IP falls within one of these CIDRs
+    # will have their X-Forwarded-For header trusted by the rate limiter.
+    # Comma-separated CIDR notation, e.g. "10.0.0.0/8,172.16.0.0/12".
+    # Leave empty (default) to never trust X-Forwarded-For.
+    rate_limit_trusted_proxies: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Comma-separated list of trusted reverse-proxy CIDRs. "
+            "X-Forwarded-For is only honoured when the direct client IP "
+            "belongs to one of these ranges. Empty = never trust XFF."
+        ),
+    )
 
     @field_validator("database_url")
     @classmethod
@@ -263,6 +276,7 @@ class Settings(BaseSettings):
         "cors_origins",
         "cors_allow_methods",
         "cors_allow_headers",
+        "rate_limit_trusted_proxies",
         mode="before",
     )
     @classmethod

@@ -34,7 +34,7 @@ async def test_register_endpoint_success(
                 access_token=create_access_token(
                     subject=sample_user.id,
                     settings=test_settings,
-                ),
+                )[0],
                 token_type="bearer",
                 expires_in=3600,
                 user=UserRead.model_validate(sample_user),
@@ -127,7 +127,7 @@ async def test_login_endpoint_success(
                 access_token=create_access_token(
                     subject=sample_user.id,
                     settings=test_settings,
-                ),
+                )[0],
                 token_type="bearer",
                 expires_in=3600,
                 user=UserRead.model_validate(sample_user),

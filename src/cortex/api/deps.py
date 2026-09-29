@@ -17,6 +17,7 @@ from cortex.agent.tools.rag_search import RAGSearchTool
 from cortex.core.config import Settings, get_settings
 from cortex.core.exceptions import ForbiddenError, UnauthorizedError
 from cortex.core.security import decode_access_token
+from cortex.core.token_blocklist import TokenBlocklist
 from cortex.db.models.user import User
 from cortex.db.session import Database, get_session
 from cortex.embeddings.base import EmbeddingProvider
@@ -161,6 +162,11 @@ def get_ingestion_service(
     )
 
 
+def get_token_blocklist(request: Request) -> TokenBlocklist | None:
+    """Resolve the application-scoped TokenBlocklist (None when Redis is absent)."""
+    return getattr(request.app.state, "token_blocklist", None)  # type: ignore[no-any-return]
+
+
 async def get_current_user(
     credentials: Annotated[
         HTTPAuthorizationCredentials | None,
@@ -168,13 +174,24 @@ async def get_current_user(
     ],
     settings: Annotated[Settings, Depends(get_settings)],
     user_service: Annotated[UserService, Depends(get_user_service)],
+    blocklist: Annotated[TokenBlocklist | None, Depends(get_token_blocklist)],
 ) -> User:
-    """Resolve the authenticated user from a Bearer JWT access token."""
+    """Resolve the authenticated user from a Bearer JWT access token.
+
+    Also checks the token's ``jti`` against the Redis blocklist so that
+    revoked tokens (e.g. after logout) are immediately rejected.
+    """
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise UnauthorizedError("Not authenticated")
 
     payload = decode_access_token(credentials.credentials, settings)
     user_id = payload["sub"]
+
+    # Check jti blocklist (revocation). Fail-open when Redis is unavailable.
+    jti: str | None = payload.get("jti")
+    if jti and blocklist is not None and await blocklist.is_revoked(jti):
+        raise UnauthorizedError("Token has been revoked")
+
     user = await user_service.get_by_id(user_id)
     if user is None:
         raise UnauthorizedError("Could not validate credentials")
@@ -319,6 +336,7 @@ AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 StateStoreDep = Annotated[StateStore, Depends(get_state_store)]
 MemoryServiceDep = Annotated[MemoryService, Depends(get_memory_service)]
 MemoryVectorStoreDep = Annotated[MemoryVectorStore, Depends(get_memory_vector_store)]
+TokenBlocklistDep = Annotated[TokenBlocklist | None, Depends(get_token_blocklist)]
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 CurrentActiveUserDep = Annotated[User, Depends(get_current_active_user)]
 

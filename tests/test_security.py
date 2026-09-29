@@ -24,7 +24,7 @@ def test_hash_and_verify_password() -> None:
 
 def test_create_and_decode_access_token(test_settings: Settings) -> None:
     """Access tokens round-trip subject and custom claims."""
-    token = create_access_token(
+    token, _jti = create_access_token(
         subject="user-123",
         settings=test_settings,
         extra_claims={"email": "alice@example.com"},
@@ -46,6 +46,6 @@ def test_decode_token_with_wrong_secret_raises(test_settings: Settings) -> None:
     other = test_settings.model_copy(
         update={"jwt_secret_key": "another-secret-key-that-is-32chars!!"}
     )
-    token = create_access_token(subject="user-123", settings=other)
+    token, _jti = create_access_token(subject="user-123", settings=other)
     with pytest.raises(UnauthorizedError):
         decode_access_token(token, test_settings)

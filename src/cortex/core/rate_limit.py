@@ -10,6 +10,15 @@ Design
 * Returns ``429 Too Many Requests`` with a ``Retry-After`` header when the
   limit is exceeded.
 
+X-Forwarded-For handling
+------------------------
+``X-Forwarded-For`` is *only* trusted when the **direct** client IP
+(``request.client.host``) belongs to one of the configured
+``trusted_proxies`` CIDRs.  When no trusted-proxy CIDRs are configured
+(the default), ``X-Forwarded-For`` is **never** used — the direct client
+IP is always the rate-limit key.  This prevents a trivial IP-spoof attack
+where an attacker sends a forged ``X-Forwarded-For`` header.
+
 Limitations
 -----------
 This implementation is single-process.  For multi-process / multi-node
@@ -18,6 +27,7 @@ deployments a Redis-backed rate limiter (Phase 16+) is required.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import time
 from collections import deque
@@ -36,6 +46,40 @@ logger = logging.getLogger(__name__)
 _WINDOW_SECONDS = 60  # sliding window width
 
 
+_Network = ipaddress.IPv4Network | ipaddress.IPv6Network
+
+
+def _parse_networks(cidrs: list[str]) -> list[_Network]:
+    """Parse a list of CIDR strings into network objects, skipping invalid entries."""
+    networks: list[_Network] = []
+    for cidr in cidrs:
+        cidr = cidr.strip()
+        if not cidr:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            logger.warning(
+                "RateLimitMiddleware: invalid trusted proxy CIDR %r — ignored",
+                cidr,
+            )
+    return networks
+
+
+def _ip_in_networks(
+    ip_str: str,
+    networks: list[_Network],
+) -> bool:
+    """Return True if *ip_str* is contained in any of *networks*."""
+    if not networks:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return any(addr in net for net in networks)
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Sliding-window per-IP rate limiter.
 
@@ -50,6 +94,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         requests whose path does NOT start with ``path_prefix`` are
         passed through unchanged.  When ``None`` (default) all paths
         are rate-limited.
+    trusted_proxies:
+        List of CIDR strings whose direct-connected IPs are trusted to
+        supply an accurate ``X-Forwarded-For`` header.  When empty
+        (the default), ``X-Forwarded-For`` is never trusted.
     """
 
     def __init__(
@@ -58,24 +106,32 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         *,
         requests_per_minute: int = 60,
         path_prefix: str | None = None,
+        trusted_proxies: list[str] | None = None,
     ) -> None:
         super().__init__(app)
         self._rpm = requests_per_minute
         self._prefix = path_prefix
+        self._trusted_networks = _parse_networks(trusted_proxies or [])
         # Per-IP deque of request timestamps (float, seconds since epoch).
         # Access is single-threaded within an asyncio event loop, so no
         # explicit lock is needed.
         self._buckets: dict[str, deque[float]] = {}
 
     def _get_client_ip(self, request: Request) -> str:
-        """Return the best-effort client IP address."""
-        # Respect X-Forwarded-For when behind a proxy.
+        """Return the effective client IP address.
+
+        ``X-Forwarded-For`` is honoured **only** when the direct client IP
+        (``request.client.host``) is within a configured trusted-proxy CIDR.
+        Otherwise the direct client IP is returned as-is.
+        """
+        direct_ip = request.client.host if request.client is not None else "unknown"
+
         forwarded_for = request.headers.get("X-Forwarded-For")
-        if forwarded_for:
+        if forwarded_for and _ip_in_networks(direct_ip, self._trusted_networks):
+            # Use the left-most (client) IP from the XFF chain.
             return forwarded_for.split(",")[0].strip()
-        if request.client is not None:
-            return request.client.host
-        return "unknown"
+
+        return direct_ip
 
     def _is_limited(self, ip: str) -> tuple[bool, int]:
         """Check and record the current request; return (limited, retry_after).

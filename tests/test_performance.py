@@ -182,7 +182,7 @@ class TestJWTPerformance:
         )
 
         def _round_trip() -> None:
-            token = create_access_token(subject="u1", settings=settings)
+            token, _jti = create_access_token(subject="u1", settings=settings)
             decode_access_token(token, settings)
 
         stats = _measure(_round_trip, n=500)

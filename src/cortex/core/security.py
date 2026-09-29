@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -39,23 +40,33 @@ def create_access_token(
     subject: str,
     settings: Settings,
     extra_claims: dict[str, Any] | None = None,
-) -> str:
-    """Create a signed JWT access token for the given subject (user id)."""
+) -> tuple[str, str]:
+    """Create a signed JWT access token for the given subject (user id).
+
+    Returns
+    -------
+    tuple[str, str]
+        ``(token, jti)`` — the encoded JWT and its unique ``jti`` claim.
+        The caller should persist ``jti`` to allow future revocation.
+    """
     now = datetime.now(UTC)
     expire = now + timedelta(minutes=settings.jwt_access_token_expire_minutes)
+    jti = uuid.uuid4().hex
     payload: dict[str, Any] = {
         "sub": subject,
         "iat": now,
         "exp": expire,
         "type": "access",
+        "jti": jti,
     }
     if extra_claims:
         payload.update(extra_claims)
-    return jwt.encode(
+    token = jwt.encode(
         payload,
         settings.jwt_secret_key,
         algorithm=settings.jwt_algorithm,
     )
+    return token, jti
 
 
 def decode_access_token(token: str, settings: Settings) -> dict[str, Any]:

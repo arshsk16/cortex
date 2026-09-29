@@ -1,15 +1,20 @@
-"""Authentication HTTP endpoints."""
+"""Authentication HTTP endpoints: register, login, logout, me."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from datetime import UTC, datetime
 
-from cortex.api.deps import AuthServiceDep, CurrentActiveUserDep
-from cortex.schemas.auth import (
-    AuthResponse,
-    UserLoginRequest,
-    UserRegisterRequest,
+from fastapi import APIRouter, Request, status
+
+from cortex.api.deps import (
+    AuthServiceDep,
+    CurrentActiveUserDep,
+    SettingsDep,
+    TokenBlocklistDep,
 )
+from cortex.core.exceptions import UnauthorizedError
+from cortex.core.security import decode_access_token
+from cortex.schemas.auth import AuthResponse, UserLoginRequest, UserRegisterRequest
 from cortex.schemas.user import UserRead
 
 router = APIRouter(tags=["Authentication"])
@@ -57,6 +62,52 @@ async def login(
 ) -> AuthResponse:
     """Authenticate a user and issue an access token."""
     return await auth_service.login(payload)
+
+
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Log out",
+    description=(
+        "Revoke the current access token by adding its ``jti`` to the Redis "
+        "blocklist. Subsequent requests with this token will be rejected with "
+        "401 even before the token expires naturally. "
+        "If Redis is unavailable the call succeeds silently (fail-open)."
+    ),
+    responses={
+        204: {"description": "Successfully logged out"},
+        401: {"description": "Missing or invalid bearer token"},
+    },
+)
+async def logout(
+    request: Request,
+    current_user: CurrentActiveUserDep,
+    settings: SettingsDep,
+    blocklist: TokenBlocklistDep,
+) -> None:
+    """Revoke the current bearer token."""
+    # Extract raw token from the Authorization header.
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        raise UnauthorizedError("Not authenticated")
+    raw_token = auth_header[7:].strip()
+
+    # Decode to read jti + exp (signature already verified by CurrentActiveUserDep).
+    payload = decode_access_token(raw_token, settings)
+    jti: str | None = payload.get("jti")
+    if not jti:
+        # Token predates jti support -- nothing to revoke.
+        return
+
+    # Calculate remaining lifetime so the blocklist entry auto-expires with the token.
+    exp_ts: int | float | None = payload.get("exp")
+    if exp_ts is not None:
+        remaining = int(exp_ts) - int(datetime.now(UTC).timestamp())
+    else:
+        remaining = settings.jwt_access_token_expire_minutes * 60
+
+    if blocklist is not None:
+        await blocklist.revoke(jti, ttl_seconds=remaining)
 
 
 @router.get(

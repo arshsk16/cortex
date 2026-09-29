@@ -80,7 +80,7 @@ class AuthService:
 
     def _build_auth_response(self, user: User) -> AuthResponse:
         """Issue a JWT and package it with the public user representation."""
-        token = create_access_token(
+        token, _jti = create_access_token(
             subject=user.id,
             settings=self._settings,
             extra_claims={"email": user.email, "role": user.role.value},

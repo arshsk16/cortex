@@ -10,6 +10,7 @@ from cortex.api.deps import (
     CurrentActiveUserDep,
     DocumentServiceDep,
     IngestionServiceDep,
+    SettingsDep,
 )
 from cortex.schemas.document import DocumentList, DocumentResponse
 from cortex.schemas.ingestion import DocumentProcessResponse
@@ -36,11 +37,36 @@ router = APIRouter(prefix="/documents", tags=["Documents"])
 async def upload_document(
     current_user: CurrentActiveUserDep,
     document_service: DocumentServiceDep,
+    settings: SettingsDep,
     file: Annotated[UploadFile, File(description="PDF file to upload")],
     title: Annotated[str | None, Form(description="Optional document title")] = None,
 ) -> DocumentResponse:
-    """Accept a PDF upload and persist document metadata."""
-    content = await file.read()
+    """Accept a PDF upload and persist document metadata.
+
+    The file is read in 64 KiB chunks and rejected as soon as the total
+    exceeds ``document_max_file_size_bytes`` (default 25 MiB), avoiding
+    reading the entire payload into memory before validation.
+    """
+    from cortex.core.exceptions import BadRequestError
+
+    max_bytes = settings.document_max_file_size_bytes
+    chunk_size = 65_536  # 64 KiB
+    chunks: list[bytes] = []
+    total = 0
+
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise BadRequestError(
+                f"File exceeds maximum allowed size of {max_bytes} bytes",
+                details={"max_bytes": max_bytes},
+            )
+        chunks.append(chunk)
+
+    content = b"".join(chunks)
     document = await document_service.upload(
         user=current_user,
         content=content,
