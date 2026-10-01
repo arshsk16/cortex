@@ -1,109 +1,131 @@
 # Cortex
 
-Enterprise-grade AI platform backend built with FastAPI, PostgreSQL, SQLAlchemy, and Alembic.
+Cortex is an enterprise-grade AI platform backend. It provides a robust foundation for building AI-powered applications, offering document ingestion, Retrieval-Augmented Generation (RAG), agentic workflows with tool calling, and long-term conversational memory. It is built with FastAPI, PostgreSQL, Redis, and ChromaDB.
 
-## Requirements
+## Architecture & Components
 
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/)
-- PostgreSQL 14+
+- **Web Framework**: FastAPI (async ASGI, Pydantic v2 validation).
+- **Relational Database**: PostgreSQL 14+ via SQLAlchemy 2.0 (asyncpg) and Alembic for migrations.
+- **Vector Database**: ChromaDB for storing document embeddings and extracted memory fragments.
+- **State & Cache**: Redis for agent state persistence, JWT revocation blocklists, and sliding-window rate limiting.
+- **LLM & Embeddings**: Abstracted provider interfaces (supporting models like `BAAI/bge-small-en-v1.5`).
 
-## Quick start
+## Core Features
+
+### 1. Document & RAG Pipeline
+- **Upload & Streaming Validation**: Secure PDF upload with streaming file-size enforcement (max 25 MB).
+- **Ingestion**: Asynchronous extraction, cleaning, chunking, and embedding.
+- **Retrieval**: Semantic search against ChromaDB using cosine similarity.
+
+### 2. Agent & Tool Calling
+- **Agent Orchestration**: ReAct-style agent orchestration powered by the LLM.
+- **Tools**: Includes `RAGSearchTool`, `DocumentListTool`, and a `CalculatorTool`.
+- **Streaming**: Supports Server-Sent Events (SSE) for streaming agent thought processes and responses in real time (`/api/v1/agent/stream`).
+
+### 3. Conversation & Long-Term Memory
+- **Conversations**: Full chat history persisted to PostgreSQL.
+- **Memory Extraction**: A background `MemoryExtractorService` analyzes conversations to extract persistent user facts and preferences, embedding them into a dedicated Chroma memory collection.
+- **State Store**: Redis caches agent state with TTLs to support multi-turn conversational agents.
+
+### 4. Authentication & Security Hardening
+- **JWT Authentication**: Secure Bearer tokens with `jti` (JWT ID) claims.
+- **Revocation Blocklist**: Redis-backed token blocklist for immediate, fail-open logout revocation.
+- **Rate Limiting**: Sliding-window rate limiter with per-IP isolation and Trusted Proxy CIDR support to prevent `X-Forwarded-For` spoofing.
+- **API Gating**: Interactive OpenAPI docs (`/docs`, `/redoc`) are automatically disabled in production environments.
+
+## Deployment & DevOps
+
+### Docker & Docker Compose
+A complete local environment is provided via `docker-compose.yml`, spinning up PostgreSQL, Redis, and the Cortex API (via the included `Dockerfile`).
+
+### Kubernetes
+Production-ready Kubernetes manifests are provided in the `k8s/` directory (deployable via Kustomize). Features include:
+- Deployments, Services, and Ingress configuration.
+- ConfigMaps and Secrets for environment variables.
+- Horizontal Pod Autoscaler (HPA) and resource limits.
+- Liveness and readiness probes pointing to `/api/v1/health/live` and `/api/v1/health/ready`.
+
+### CI/CD
+GitHub Actions (`.github/workflows/ci.yml`) enforces quality by running:
+- Linting (`ruff`) and Type Checking (`mypy`).
+- Full test suite execution (pytest).
+- Docker image build and containerized smoke tests against live backing services.
+
+### Performance Benchmarking
+A suite of performance and load tests is located in `benchmarks/`. The application is capable of handling high concurrency, with metrics tracked for PostgreSQL loads, RAG retrieval times, and API latencies.
+
+## Quality & Testing
+
+The project is rigorously tested, currently passing **786 automated tests** (pytest) covering unit, integration, and security edge cases. Code formatting and linting are strictly enforced via `ruff`, ensuring zero violations.
+
+## Quick Start
+
+### Option 1: Local Development (uv)
+
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-# Install dependencies (creates .venv)
+# 1. Install dependencies
 uv sync --all-extras
 
-# Copy environment file and edit DATABASE_URL if needed
+# 2. Configure environment
 cp .env.example .env
+# Edit .env to set DATABASE_URL, REDIS_URL, and a strong JWT_SECRET_KEY (min 32 chars)
 
-# Configure DATABASE_URL and JWT_SECRET_KEY in .env
-
-# Apply database migrations (once models exist)
+# 3. Apply database migrations
 uv run alembic upgrade head
 
-# Start the API server
+# 4. Start the server
 uv run cortex
-# or
-uv run uvicorn cortex.main:app --reload --host 0.0.0.0 --port 8000
+# Or use uvicorn directly: uv run uvicorn cortex.main:app --reload
 ```
 
-Interactive docs: [http://localhost:8000/docs](http://localhost:8000/docs)
+### Option 2: Docker Compose
 
-Health check: [http://localhost:8000/api/v1/health](http://localhost:8000/api/v1/health)
-
-## Authentication (Phase 1)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/v1/register` | Create account; returns JWT + user |
-| `POST` | `/api/v1/login` | Email/password login; returns JWT + user |
-| `GET` | `/api/v1/me` | Current user (`Authorization: Bearer <token>`) |
-
-Set a strong `JWT_SECRET_KEY` (min 32 characters) in `.env` before deploying.
-
-## Document management (Phase 2)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/v1/documents/upload` | Upload PDF (max 25 MB); returns metadata |
-| `GET` | `/api/v1/documents` | List owned documents (paginated) |
-| `GET` | `/api/v1/documents/{id}` | Retrieve owned document metadata |
-| `DELETE` | `/api/v1/documents/{id}` | Delete owned document and stored file |
-
-Uploaded files are stored under `storage/documents/` (configurable via `DOCUMENT_STORAGE_PATH`).
-
-## Document ingestion (Phase 3)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/v1/documents/{id}/process` | Extract, clean, chunk PDF; store chunks |
-
-Status flow: `uploaded` → `processing` → `ready` (or `failed` on error).
-
-## Embeddings & vector store (Phase 4)
-
-During processing, each chunk is embedded with `sentence-transformers` (default: `BAAI/bge-small-en-v1.5`) and stored in persistent ChromaDB. Chunk text remains in PostgreSQL; Chroma stores embeddings plus `chunk_id`, `document_id`, and `chunk_index` metadata only.
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `EMBEDDING_MODEL_NAME` | `BAAI/bge-small-en-v1.5` | Sentence-transformers model |
-| `EMBEDDING_BATCH_SIZE` | `32` | Embedding batch size |
-| `CHROMA_PERSIST_DIRECTORY` | `storage/chroma` | ChromaDB data directory |
-| `CHROMA_COLLECTION_NAME` | `document_chunks` | Chroma collection name |
-
-## Project layout
-
-```
-cortex/
-├── alembic/                 # Database migration environment
-├── src/cortex/
-│   ├── api/                 # HTTP routers, endpoints, DI wiring
-│   ├── core/                # Settings, logging, exceptions
-│   ├── db/                  # Engine, sessions, ORM models
-│   ├── schemas/             # Pydantic v2 request/response models
-│   ├── services/            # Business logic (SOLID, injectable)
-│   ├── utils/               # Shared pure helpers
-│   └── main.py              # App factory and ASGI entrypoint
-├── tests/
-├── .env.example
-├── alembic.ini
-└── pyproject.toml
-```
-
-## Development
+Requires Docker and Docker Compose.
 
 ```bash
-uv sync --all-extras
-uv run pytest
-uv run ruff check src tests
-uv run mypy src
+cp .env.example .env
+docker compose up --build
 ```
 
-## Architecture notes
+### Accessing the API
 
-- **Routers** only handle HTTP concerns and delegate to services.
-- **Services** contain business logic and receive collaborators via constructors.
-- **Dependency injection** is wired in `api/deps.py` using FastAPI `Depends`.
-- **Settings** are loaded once via `pydantic-settings` from environment / `.env`.
-- **Database** access is async (`asyncpg` + SQLAlchemy 2.0 asyncio).
+- **Interactive Docs**: [http://localhost:8000/docs](http://localhost:8000/docs) (Development mode only)
+- **Liveness Probe**: [http://localhost:8000/api/v1/health/live](http://localhost:8000/api/v1/health/live)
+- **Readiness Probe**: [http://localhost:8000/api/v1/health/ready](http://localhost:8000/api/v1/health/ready)
+
+## Project Structure
+
+```text
+cortex/
+├── .github/                 # CI/CD workflows
+├── alembic/                 # Database migrations
+├── benchmarks/              # Performance and load testing scripts
+├── docker/                  # Docker-related entrypoints
+├── k8s/                     # Kubernetes manifests & kustomize config
+├── src/cortex/
+│   ├── agent/               # Agent orchestration, tools, and streaming
+│   ├── api/                 # HTTP routers, dependencies, and endpoints
+│   ├── core/                # Settings, rate-limiting, security, blocklist
+│   ├── db/                  # SQLAlchemy models, sessions, engine
+│   ├── embeddings/          # Embedding providers (SentenceTransformers)
+│   ├── llm/                 # LLM provider interfaces
+│   ├── retrieval/           # RAG retrieval logic
+│   ├── schemas/             # Pydantic v2 schemas
+│   ├── services/            # Business logic (Auth, Document, Memory, etc.)
+│   ├── state_store/         # Redis / Null state store
+│   ├── vectorstore/         # ChromaDB interfaces
+│   └── main.py              # Application factory and ASGI entry
+├── tests/                   # 780+ pytest suite
+├── .env.example             # Template environment variables
+├── docker-compose.yml       # Local multi-container stack
+├── Dockerfile               # Production container definition
+├── pyproject.toml           # Project metadata and dependencies
+└── uv.lock                  # Pinned dependency lockfile
+```
+
+## Known Production Limitations
+
+- **ChromaDB**: Currently utilizes the persistent file-based Chroma client (`PersistentClient`). For highly available, multi-replica deployments (e.g., scaled via Kubernetes HPA), this should be migrated to a remote ChromaDB server (`HttpClient`) to avoid split-brain vector state.
+- **HMAC JWT**: Access tokens use symmetric signing (HS256). The `JWT_SECRET_KEY` must be securely managed (e.g., via Kubernetes Secrets) and kept strictly confidential.
