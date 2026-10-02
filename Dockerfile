@@ -35,11 +35,11 @@ COPY pyproject.toml uv.lock README.md ./
 # Install all production dependencies into .venv (skip the project itself).
 # --no-dev is omitted: dev packages are optional extras (extra == 'dev'),
 # not a uv dev group, so they are already excluded from the default sync.
-RUN uv sync --frozen --no-install-project
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-install-project
 
 # Copy source and install the project itself.
 COPY src/ ./src/
-RUN uv sync --frozen
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen
 
 
 # ---------------------------------------------------------------------------

@@ -137,7 +137,7 @@ jobs:
           tags: cortex:ci-${{ github.sha }}
           # Use GitHub Actions cache for faster repeated builds
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
 
       - name: Smoke-test the image
         # --entrypoint python bypasses /app/entrypoint.sh (which blocks on
