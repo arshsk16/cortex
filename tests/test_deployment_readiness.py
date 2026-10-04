@@ -54,6 +54,39 @@ class TestDockerfile:
     def test_healthcheck_uses_health_live(self, dockerfile: str) -> None:
         assert "/health/live" in dockerfile
 
+    def test_healthcheck_uses_python_not_curl(self, dockerfile: str) -> None:
+        """HEALTHCHECK must use stdlib urllib.request, not the curl binary.
+
+        python:3.12-slim does not ship curl; relying on it forces an extra
+        apt-get install and creates a version-drift risk.  The stdlib
+        urllib.request one-liner is always available.
+        """
+        import re
+
+        # Isolate the HEALTHCHECK line(s) only.
+        hc_lines = " ".join(
+            line
+            for line in dockerfile.splitlines()
+            if re.search(r"^HEALTHCHECK|CMD.*health", line.strip())
+        )
+        assert "urllib.request" in hc_lines, (
+            "Dockerfile HEALTHCHECK must use urllib.request, not curl"
+        )
+        assert "curl" not in hc_lines, (
+            "Dockerfile HEALTHCHECK must NOT use curl (not present in python:3.12-slim)"
+        )
+
+    def test_curl_not_installed_in_apt(self, dockerfile: str) -> None:
+        """curl must not appear in apt-get install; it is no longer needed."""
+        apt_lines = " ".join(
+            line
+            for line in dockerfile.splitlines()
+            if "apt-get install" in line
+        )
+        assert "curl" not in apt_lines, (
+            "curl must not be installed — the healthcheck uses Python stdlib instead"
+        )
+
     def test_healthcheck_has_start_period(self, dockerfile: str) -> None:
         assert "start-period" in dockerfile
 
@@ -164,6 +197,22 @@ class TestDockerCompose:
 
     def test_cortex_healthcheck_uses_health_live(self, compose: str) -> None:
         assert "/health/live" in compose
+
+    def test_cortex_healthcheck_uses_python_not_curl(self, compose: str) -> None:
+        """docker-compose healthcheck must use Python urllib.request, not curl."""
+        # Grab the healthcheck block for the cortex service only
+        # (after the line that contains 'healthcheck:' inside the cortex block).
+        hc_line = " ".join(
+            line
+            for line in compose.splitlines()
+            if "urllib.request" in line or ("curl" in line and "health" in line)
+        )
+        assert "urllib.request" in compose, (
+            "docker-compose cortex healthcheck must use urllib.request"
+        )
+        assert "curl" not in hc_line, (
+            "docker-compose cortex healthcheck must NOT use curl"
+        )
 
     def test_network_defined(self, compose: str) -> None:
         assert "cortex_net" in compose

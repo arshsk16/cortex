@@ -54,10 +54,11 @@ RUN groupadd --gid 1001 cortex \
  && useradd  --uid 1001 --gid cortex --no-create-home --shell /usr/sbin/nologin cortex
 
 # System packages:
-#   curl   — used by the Docker HEALTHCHECK command
 #   libpq5 — PostgreSQL client library required by asyncpg
+# curl is intentionally NOT installed; the HEALTHCHECK uses Python's
+# built-in urllib.request so no extra packages are needed.
 RUN apt-get update -qq \
- && apt-get install -y --no-install-recommends curl libpq5 \
+ && apt-get install -y --no-install-recommends libpq5 \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -89,8 +90,9 @@ USER cortex
 EXPOSE 8000
 
 # Liveness probe via the Phase 15 /health/live endpoint.
+# Uses Python stdlib (urllib.request) — no curl dependency needed.
 # start_period allows migrations to run before checks begin.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -fsS http://localhost:8000/health/live || exit 1
+    CMD python -c "import urllib.request, sys; r = urllib.request.urlopen('http://localhost:8000/health/live', timeout=9); sys.exit(0 if r.status == 200 else 1)"
 
 ENTRYPOINT ["/app/entrypoint.sh"]
