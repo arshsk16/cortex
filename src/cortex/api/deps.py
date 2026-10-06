@@ -164,7 +164,7 @@ def get_ingestion_service(
 
 def get_token_blocklist(request: Request) -> TokenBlocklist | None:
     """Resolve the application-scoped TokenBlocklist (None when Redis is absent)."""
-    return getattr(request.app.state, "token_blocklist", None)  # type: ignore[no-any-return]
+    return getattr(request.app.state, "token_blocklist", None)
 
 
 async def get_current_user(

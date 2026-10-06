@@ -51,10 +51,10 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
     # Internal helpers — shared
     # ------------------------------------------------------------------
 
-    def _get_client(self) -> object:
+    def _get_client(self) -> Any:
         """Return (and cache) the google.genai Client."""
         if self._client is None:
-            import google.genai as genai  # type: ignore[import-untyped]
+            import google.genai as genai
 
             self._client = genai.Client(api_key=self._api_key)
             logger.info("Initialised Gemini client (model=%s)", self._model_name)
@@ -62,7 +62,7 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
 
     def _build_config(self) -> object:
         """Build a GenerateContentConfig for the configured parameters."""
-        from google.genai import types  # type: ignore[import-untyped]
+        from google.genai import types
 
         return types.GenerateContentConfig(
             temperature=self._temperature,
@@ -80,7 +80,7 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
             contents=prompt,
             config=config,
         )
-        return response.text.strip()
+        return response.text.strip()  # type: ignore[no-any-return]
 
     # ------------------------------------------------------------------
     # LLMProvider interface
@@ -170,6 +170,70 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
 
         return _stream()
 
+    async def generate_structured(
+        self,
+        *,
+        prompt: str,
+        schema: type[Any],
+        system_instruction: str | None = None,
+    ) -> Any:
+        """Generate a structured response using Gemini JSON schema output."""
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._generate_structured_sync, prompt, schema, system_instruction
+                ),
+                timeout=self._timeout,
+            )
+            logger.debug(
+                "Gemini structured generation complete (model=%s, schema=%s)",
+                self._model_name,
+                schema.__name__,
+            )
+            return result
+        except TimeoutError as exc:
+            logger.error(
+                "Gemini structured generation timed out after %ds (model=%s)",
+                self._timeout,
+                self._model_name,
+            )
+            raise ServiceUnavailableError(
+                "LLM request timed out",
+                details={"model": self._model_name, "timeout_s": self._timeout},
+            ) from exc
+        except ServiceUnavailableError:
+            raise
+        except Exception as exc:
+            logger.exception("Gemini structured generation failed (model=%s)", self._model_name)
+            raise ServiceUnavailableError(
+                "LLM structured generation failed",
+                details={"model": self._model_name, "reason": str(exc)},
+            ) from exc
+
+    def _generate_structured_sync(
+        self,
+        prompt: str,
+        schema: type[Any],
+        system_instruction: str | None,
+    ) -> Any:
+        from google.genai import types
+
+        client = self._get_client()
+        config = types.GenerateContentConfig(
+            temperature=self._temperature,
+            max_output_tokens=self._max_output_tokens,
+            response_mime_type="application/json",
+            response_schema=schema,
+            system_instruction=system_instruction,
+        )
+
+        response = client.models.generate_content(
+            model=self._model_name,
+            contents=prompt,
+            config=config,
+        )
+        return schema.model_validate_json(response.text.strip())
+
     # ------------------------------------------------------------------
     # SupportsToolCalling interface
     # ------------------------------------------------------------------
@@ -237,7 +301,7 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
         tool_schemas: list[dict[str, Any]],
     ) -> GenerateWithToolsResult:
         """Synchronous implementation of native Gemini function calling."""
-        from google.genai import types  # type: ignore[import-untyped]
+        from google.genai import types
 
         client = self._get_client()
         contents = self._messages_to_contents(messages)
@@ -271,7 +335,7 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
         ``parameters_json_schema`` so the raw JSON Schema dict is passed
         directly to the SDK without manual Schema object construction.
         """
-        from google.genai import types  # type: ignore[import-untyped]
+        from google.genai import types
 
         declarations = []
         for schema in tool_schemas:
@@ -295,7 +359,7 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
         * ``role="model"`` with ``tool_call`` → Content(role="model", function_call)
         * ``role="tool"`` with ``tool_result``→ Content(role="user", function_response)
         """
-        from google.genai import types  # type: ignore[import-untyped]
+        from google.genai import types
 
         contents = []
         for msg in messages:
@@ -347,7 +411,7 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
                         ],
                     )
                 )
-        return contents
+        return contents  # type: ignore[return-value]
 
     @staticmethod
     def _parse_tool_response(response: object) -> GenerateWithToolsResult:

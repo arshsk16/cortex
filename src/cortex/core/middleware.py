@@ -54,7 +54,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
         def _record_factory(*args: object, **kwargs: object) -> logging.LogRecord:
             record = _original_factory(*args, **kwargs)
-            record.request_id = get_request_id()  # type: ignore[attr-defined]
+            record.request_id = get_request_id()
             return record
 
         logging.setLogRecordFactory(_record_factory)

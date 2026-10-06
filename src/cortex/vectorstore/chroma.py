@@ -85,7 +85,7 @@ class ChromaVectorStore(VectorStore):
     def _add_chunks_sync(self, chunks: list[ChunkVectorRecord]) -> None:
         self._collection.upsert(
             ids=[chunk.chunk_id for chunk in chunks],
-            embeddings=[chunk.embedding for chunk in chunks],
+            embeddings=[chunk.embedding for chunk in chunks],  # type: ignore[arg-type]
             metadatas=[
                 {
                     "document_id": chunk.document_id,
@@ -108,9 +108,9 @@ class ChromaVectorStore(VectorStore):
     ) -> list[VectorSearchResult]:
         where = {"document_id": document_id} if document_id is not None else None
         response = self._collection.query(
-            query_embeddings=[query_embedding],
+            query_embeddings=[query_embedding],  # type: ignore[arg-type]
             n_results=limit,
-            where=where,
+            where=where,  # type: ignore[arg-type]
             include=["metadatas", "distances"],
         )
 

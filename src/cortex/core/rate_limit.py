@@ -162,7 +162,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         """Rate-check the request; pass through or return 429."""
         # Skip if this middleware is scoped to a prefix and path doesn't match.
         if self._prefix and not request.url.path.startswith(self._prefix):
-            return await call_next(request)  # type: ignore[operator]
+            return await call_next(request)  # type: ignore[operator,no-any-return]
 
         ip = self._get_client_ip(request)
         limited, retry_after = self._is_limited(ip)
@@ -188,4 +188,4 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 headers={"Retry-After": str(retry_after)},
             )
 
-        return await call_next(request)  # type: ignore[operator]
+        return await call_next(request)  # type: ignore[operator,no-any-return]

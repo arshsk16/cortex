@@ -41,6 +41,9 @@ jobs:
       - name: Run Ruff
         run: uv run ruff check .
 
+      - name: Run Mypy
+        run: uv run mypy
+
   # ---------------------------------------------------------------------------
   # Job 2: Tests (pytest with live PostgreSQL + Redis)
   # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -194,7 +195,7 @@ class ConversationService:
         conversation_id: str,
         role: str,
         content: str,
-        citations: list[dict] | None = None,
+        citations: list[dict[str, Any]] | None = None,
     ) -> Message:
         """Persist a new message and update the conversation's updated_at.
 
@@ -214,7 +215,6 @@ class ConversationService:
         conv = await self._session.get(Conversation, conversation_id)
         if conv is not None:
             from datetime import UTC, datetime
-
             conv.updated_at = datetime.now(UTC)
 
         await self._session.flush()

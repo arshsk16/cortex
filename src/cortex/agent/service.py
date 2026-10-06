@@ -473,7 +473,7 @@ class AgentService:
                 first_message=question,
             )
 
-        memory_hits = []
+        memory_hits: list[Any] = []
         if self._memory_service is not None and self._memory_limit > 0:
             try:
                 memory_hits = await self._memory_service.search(
@@ -716,7 +716,7 @@ class AgentService:
 
             if action == "tool_call":
                 tool_name = str(decision.get("tool", "")).strip()
-                tool_args: dict = decision.get("args", {})
+                tool_args: dict[str, Any] = decision.get("args", {})
                 frozen = (tool_name, _freeze_args(tool_args))
 
                 if frozen in seen_calls:
@@ -994,7 +994,7 @@ class AgentService:
 
             if action == "tool_call":
                 tool_name = str(decision.get("tool", "")).strip()
-                tool_args: dict = decision.get("args", {})
+                tool_args: dict[str, Any] = decision.get("args", {})
                 frozen = (tool_name, _freeze_args(tool_args))
 
                 if frozen in seen_calls:
@@ -1082,7 +1082,7 @@ class AgentService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_decision(raw: str) -> dict:
+    def _parse_decision(raw: str) -> dict[str, Any]:
         """Extract a JSON decision dict from the LLM's raw text response."""
         text = raw.strip()
         if text.startswith("```"):

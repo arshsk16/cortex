@@ -16,6 +16,7 @@ Design
 from __future__ import annotations
 
 import logging
+from typing import List
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -164,7 +165,7 @@ class MemoryService:
         user: User,
         query: str,
         limit: int = 5,
-    ) -> list[MemorySearchResult]:
+    ) -> List[MemorySearchResult]:
         """Semantic search over the calling user's memories.
 
         Returns up to ``limit`` results ordered by descending cosine

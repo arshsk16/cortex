@@ -27,12 +27,12 @@ def _prepare_password(password: str) -> str:
 
 def hash_password(password: str) -> str:
     """Hash a plaintext password using bcrypt via passlib."""
-    return _pwd_context.hash(_prepare_password(password))
+    return _pwd_context.hash(_prepare_password(password))  # type: ignore[no-any-return]
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Return True when ``plain_password`` matches ``hashed_password``."""
-    return _pwd_context.verify(_prepare_password(plain_password), hashed_password)
+    return _pwd_context.verify(_prepare_password(plain_password), hashed_password)  # type: ignore[no-any-return]
 
 
 def create_access_token(
@@ -93,4 +93,4 @@ def decode_access_token(token: str, settings: Settings) -> dict[str, Any]:
     if not subject or not isinstance(subject, str):
         raise UnauthorizedError("Could not validate credentials")
 
-    return payload
+    return payload  # type: ignore[no-any-return]

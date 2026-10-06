@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, BackgroundTasks, status
 from fastapi.responses import StreamingResponse
@@ -75,7 +76,7 @@ async def agent_run_stream(
 ) -> StreamingResponse:
     """Stream agent execution events for the given question."""
 
-    async def _event_generator():
+    async def _event_generator() -> AsyncGenerator[str, None]:
         try:
             async for event in agent_service.stream(
                 question=payload.message,

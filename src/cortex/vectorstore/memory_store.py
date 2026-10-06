@@ -127,7 +127,7 @@ class MemoryVectorStore:
     ) -> None:
         self._collection.upsert(
             ids=[memory_id],
-            embeddings=[embedding],
+            embeddings=[embedding],  # type: ignore[arg-type]
             metadatas=[{"user_id": user_id}],
         )
 
@@ -142,7 +142,7 @@ class MemoryVectorStore:
         limit: int,
     ) -> list[tuple[str, float]]:
         response = self._collection.query(
-            query_embeddings=[query_embedding],
+            query_embeddings=[query_embedding],  # type: ignore[arg-type]
             n_results=limit,
             where={"user_id": user_id},
             include=["distances"],

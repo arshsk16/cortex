@@ -55,6 +55,17 @@ class LLMProvider(ABC):
         # requiring a real yield in the abstract base.
         # Subclasses must return an AsyncIterator[str] directly.
 
+    @abstractmethod
+    async def generate_structured(
+        self,
+        *,
+        prompt: str,
+        schema: type[Any],
+        system_instruction: str | None = None,
+    ) -> Any:
+        """Generate a structured response matching the given schema."""
+        pass
+
 
 class SupportsToolCalling(ABC):
     """Mixin for LLM providers that support native structured tool calling.
