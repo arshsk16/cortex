@@ -114,9 +114,9 @@ class ChromaVectorStore(VectorStore):
             include=["metadatas", "distances"],
         )
 
-        ids = response.get("ids", [[]])[0]
-        metadatas = response.get("metadatas", [[]])[0]
-        distances = response.get("distances", [[]])[0]
+        ids = (response.get("ids") or [[]])[0]
+        metadatas = (response.get("metadatas") or [[]])[0]
+        distances = (response.get("distances") or [[]])[0]
 
         results: list[VectorSearchResult] = []
         for chunk_id, metadata, distance in zip(ids, metadatas, distances, strict=True):
@@ -126,7 +126,7 @@ class ChromaVectorStore(VectorStore):
                 VectorSearchResult(
                     chunk_id=chunk_id,
                     document_id=str(metadata["document_id"]),
-                    chunk_index=int(metadata["chunk_index"]),
+                    chunk_index=int(metadata["chunk_index"]),  # type: ignore[arg-type]
                     score=max(0.0, 1.0 - float(distance)),
                 )
             )

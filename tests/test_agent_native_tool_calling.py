@@ -67,6 +67,13 @@ class _FakeNativeProvider(LLMProvider, SupportsToolCalling):
     async def generate_stream(self, prompt: str):  # type: ignore[override]
         raise NotImplementedError
 
+    async def generate_structured(self, prompt: str, schema: type) -> object:
+        raise NotImplementedError
+
+
+
+
+
     async def generate_with_tools(
         self,
         messages: list[AgentMessage],
@@ -92,6 +99,13 @@ class _FakePromptProvider(LLMProvider):
 
     async def generate_stream(self, prompt: str):  # type: ignore[override]
         raise NotImplementedError
+
+    async def generate_structured(self, prompt: str, schema: type) -> object:
+        raise NotImplementedError
+
+
+
+
 
 
 def _make_user() -> MagicMock:

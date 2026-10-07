@@ -147,8 +147,8 @@ class MemoryVectorStore:
             where={"user_id": user_id},
             include=["distances"],
         )
-        ids: list[str] = response.get("ids", [[]])[0]
-        distances: list[float] = response.get("distances", [[]])[0]
+        ids: list[str] = (response.get("ids") or [[]])[0]
+        distances: list[float] = (response.get("distances") or [[]])[0]
         return [
             (mid, max(0.0, 1.0 - float(dist)))
             for mid, dist in zip(ids, distances, strict=True)

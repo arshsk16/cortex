@@ -75,7 +75,7 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
         config = self._build_config()
 
         # google.genai ≥ 1.0  API surface
-        response = client.models.generate_content(  # type: ignore[attr-defined]
+        response = client.models.generate_content(
             model=self._model_name,
             contents=prompt,
             config=config,
@@ -129,7 +129,7 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
                 # google.genai streaming runs synchronously; run in thread.
                 def _iter_sync() -> list[str]:
                     chunks: list[str] = []
-                    for chunk in client.models.generate_content_stream(  # type: ignore[attr-defined]
+                    for chunk in client.models.generate_content_stream(
                         model=self._model_name,
                         contents=prompt,
                         config=config,
@@ -204,7 +204,9 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
         except ServiceUnavailableError:
             raise
         except Exception as exc:
-            logger.exception("Gemini structured generation failed (model=%s)", self._model_name)
+            logger.exception(
+                "Gemini structured generation failed (model=%s)", self._model_name
+            )
             raise ServiceUnavailableError(
                 "LLM structured generation failed",
                 details={"model": self._model_name, "reason": str(exc)},
@@ -313,7 +315,7 @@ class GeminiProvider(LLMProvider, SupportsToolCalling):
             tools=tools,
         )
 
-        response = client.models.generate_content(  # type: ignore[attr-defined]
+        response = client.models.generate_content(
             model=self._model_name,
             contents=contents,
             config=config,

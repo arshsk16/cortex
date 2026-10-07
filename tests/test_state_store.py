@@ -81,6 +81,9 @@ class _FakeNativeProvider(LLMProvider, SupportsToolCalling):
 
         return _gen()
 
+    async def generate_structured(self, prompt: str, schema: type) -> object:
+        raise NotImplementedError
+
     async def generate_with_tools(self, messages, tool_schemas):
         if self._responses:
             return self._responses.pop(0)
@@ -101,6 +104,9 @@ class _FakePromptProvider(LLMProvider):
             yield "Streamed prompt answer."
 
         return _gen()
+
+    async def generate_structured(self, prompt: str, schema: type) -> object:
+        raise NotImplementedError
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +454,9 @@ class TestAgentServiceStateStoreLifecycle:
                     raise asyncio.CancelledError()
 
                 return _gen()
+
+            async def generate_structured(self, prompt: str, schema: type) -> object:
+                raise NotImplementedError
 
             async def generate_with_tools(self, messages, tool_schemas):
                 return GenerateWithToolsResult(text="ready")

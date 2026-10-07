@@ -114,6 +114,10 @@ class _NativeProvider(LLMProvider, SupportsToolCalling):
 
         return _gen()
 
+    
+    async def generate_structured(self, prompt: str, schema: type) -> object:
+        raise NotImplementedError
+
     async def generate_with_tools(self, messages, tool_schemas):
         if self._tool_responses:
             return self._tool_responses.pop(0)
@@ -140,6 +144,9 @@ class _PromptProvider(LLMProvider):
         return _gen()
 
 
+
+    async def generate_structured(self, prompt: str, schema: type) -> object:
+        raise NotImplementedError
 def _make_service(
     provider: LLMProvider,
     conv_service=None,
@@ -504,6 +511,9 @@ class TestStreamLLMFailure:
 
                 return _gen()
 
+            async def generate_structured(self, prompt: str, schema: type) -> object:
+                raise NotImplementedError
+
         provider = _FailingProvider(
             tool_responses=[_text_result()], stream_tokens=[]
         )
@@ -522,6 +532,9 @@ class TestStreamLLMFailure:
                     yield  # type: ignore[misc]
 
                 return _gen()
+
+            async def generate_structured(self, prompt: str, schema: type) -> object:
+                raise NotImplementedError
 
         provider = _FailingProvider(tool_responses=[_text_result()], stream_tokens=[])
         service = _make_service(provider)

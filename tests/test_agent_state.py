@@ -104,6 +104,10 @@ class _FakeNativeProvider(LLMProvider, SupportsToolCalling):
     async def generate_stream(self, prompt: str):  # type: ignore[override]
         raise NotImplementedError
 
+    async def generate_structured(self, prompt: str, schema: type) -> object:
+        raise NotImplementedError
+
+
     async def generate_with_tools(self, messages, tool_schemas):
         if self._responses:
             return self._responses.pop(0)
@@ -121,6 +125,10 @@ class _FakePromptProvider(LLMProvider):
 
     async def generate_stream(self, prompt: str):  # type: ignore[override]
         raise NotImplementedError
+
+    async def generate_structured(self, prompt: str, schema: type) -> object:
+        raise NotImplementedError
+
 
 
 def _make_service(
@@ -362,6 +370,8 @@ class TestHistoryNotInToolLoop:
             async def generate_stream(self, prompt: str):  # type: ignore[override]
                 raise NotImplementedError
 
+            async def generate_structured(self, prompt: str, schema: type) -> object:
+                raise NotImplementedError
             async def generate_with_tools(self, messages, tool_schemas):
                 received_messages.extend(messages)
                 return GenerateWithToolsResult(text="Done.")
@@ -538,6 +548,8 @@ class TestOwnershipSecurity:
             async def generate_stream(self, prompt: str):  # type: ignore[override]
                 raise NotImplementedError
 
+            async def generate_structured(self, prompt: str, schema: type) -> object:
+                raise NotImplementedError
             async def generate_with_tools(self, messages, tool_schemas):
                 nonlocal tool_called
                 tool_called = True

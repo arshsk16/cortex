@@ -101,6 +101,9 @@ class _PromptLLM(LLMProvider):
     async def generate_stream(self, prompt: str):
         yield (await self.generate(prompt))
 
+    async def generate_structured(self, prompt: str, schema: type) -> object:
+        raise NotImplementedError
+
 
 class _NativeLLM(LLMProvider, SupportsToolCalling):
     """Native tool-calling LLM."""
@@ -113,6 +116,9 @@ class _NativeLLM(LLMProvider, SupportsToolCalling):
 
     async def generate_stream(self, prompt: str):
         yield (await self.generate(prompt))
+
+    async def generate_structured(self, prompt: str, schema: type) -> object:
+        raise NotImplementedError
 
     async def generate_with_tools(  # type: ignore[override]
         self, messages, tool_schemas
