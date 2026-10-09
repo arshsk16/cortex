@@ -1,6 +1,6 @@
 # Redis 7 Deployment with AOF persistence
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: redis
   namespace: cortex
@@ -9,6 +9,7 @@ metadata:
     app.kubernetes.io/component: cache
     app.kubernetes.io/part-of: cortex
 spec:
+  serviceName: "redis-svc"
   replicas: 1
   selector:
     matchLabels:

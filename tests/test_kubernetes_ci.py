@@ -53,7 +53,7 @@ class TestManifestFilesExist:
         "k8s/kustomization.yaml",
         "k8s/postgres/statefulset.yaml",
         "k8s/postgres/service.yaml",
-        "k8s/redis/deployment.yaml",
+        "k8s/redis/statefulset.yaml",
         "k8s/redis/pvc.yaml",
         "k8s/redis/service.yaml",
         "k8s/cortex/deployment.yaml",
@@ -91,7 +91,7 @@ class TestYAMLValidity:
         "k8s/kustomization.yaml",
         "k8s/postgres/statefulset.yaml",
         "k8s/postgres/service.yaml",
-        "k8s/redis/deployment.yaml",
+        "k8s/redis/statefulset.yaml",
         "k8s/redis/pvc.yaml",
         "k8s/redis/service.yaml",
         "k8s/cortex/deployment.yaml",
@@ -232,18 +232,18 @@ class TestPostgresStatefulSet:
 
 
 # ===========================================================================
-# 7. Redis Deployment
+# 7. Redis StatefulSet
 # ===========================================================================
 
 
-class TestRedisDeployment:
+class TestRedisStatefulSet:
     @pytest.fixture(scope="class")
     @classmethod
     def dep(cls) -> str:
-        return _read("k8s/redis/deployment.yaml")
+        return _read("k8s/redis/statefulset.yaml")
 
-    def test_kind_is_deployment(self, dep: str) -> None:
-        assert "kind: Deployment" in dep
+    def test_kind_is_statefulset(self, dep: str) -> None:
+        assert "kind: StatefulSet" in dep
 
     def test_uses_redis7(self, dep: str) -> None:
         assert "redis:7" in dep
@@ -510,7 +510,7 @@ class TestKustomization:
             "configmap.yaml",
             "secret.yaml",
             "postgres/statefulset.yaml",
-            "redis/deployment.yaml",
+            "redis/statefulset.yaml",
             "cortex/deployment.yaml",
         ]:
             assert name in kust, f"kustomization.yaml missing: {name}"
